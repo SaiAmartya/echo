@@ -29,8 +29,19 @@ Updated by each agent after every meaningful task. One line per agent.
 - [x] **F1** — char cap raise 280 → 3500 (bundled into F1+F2+F3 commits)
 - [x] **F2** — analysis call → Gemini 3 Flash Preview (thinking enabled via config; full thread context)
 - [x] **F3** — POST /report endpoint + /report editorial page (commits 3ac2824, 3ffdd01). Awaiting human QA per R9.
-- [ ] **F4** — Swarm intelligence depth pass (per user direction: "make star feature more smart and comprehensive to truly replicate the public" — awaits proposal after F1-F3 QA passes)
+- [ ] **F-fix** — /report 409 race + auto-generate after every sim + italics readability (lead has italics; debugger-2 has backend; QA after both land)
+- [ ] **F4** — Swarm intelligence depth pass (per user direction: "make star feature more smart and comprehensive to truly replicate the public" — awaits proposal after F-fix QA passes)
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
+
+## Honest verification gap (per user concern, 2026-05-02)
+
+**We have NEVER successfully run a browser-driven E2E test.** Every "e2e tester" agent has either been spawned with the wrong template (TidalTasks orchestrator missing chrome MCP — fixed with R10) OR couldn't connect to the user's Claude Chrome extension. What we have actually verified:
+- **Wire-level** curl tests against every endpoint (passed)
+- **TypeScript** strict typecheck (passed each phase)
+- **Static security audit** (passed, see `docs/SECURITY.md`)
+- **Human QA** at every phase boundary per R9 (passed Phase D and Phase E; Phase F gated)
+
+For the hackathon ship this is acceptable — many production teams ship with wire+human and skip browser-driven CI. To close the gap, the user needs to (a) install the Claude extension at https://claude.ai/chrome, (b) sign into the same Anthropic account, then ping team-lead. After that we can record a real demo GIF for the submission deck (Phase G).
 
 ## Budget ledger
 

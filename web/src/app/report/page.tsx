@@ -246,12 +246,12 @@ function ReportBody({ report }: { report: Report }) {
         <p
           style={{
             margin: 0,
-            fontFamily: "var(--font-serif)",
-            fontStyle: "italic",
-            fontSize: 24,
-            lineHeight: 1.35,
+            fontFamily: "var(--font-sans)",
+            fontSize: 20,
+            lineHeight: 1.45,
             color: "var(--fg-1)",
             letterSpacing: "-0.01em",
+            fontWeight: 400,
           }}
         >
           {report.executive_summary}
@@ -371,7 +371,6 @@ function ReportBody({ report }: { report: Report }) {
                       margin: 0,
                       paddingLeft: 12,
                       borderLeft: "2px solid var(--border-strong, var(--border))",
-                      fontStyle: "italic",
                       fontSize: 13,
                       lineHeight: 1.5,
                       color: "var(--fg-2)",
