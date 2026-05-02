@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS personas (
     bio TEXT NOT NULL,
     profession TEXT,
     hot_buttons TEXT,
+    voice_cadence TEXT NOT NULL DEFAULT 'direct',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (simulation_id, persona_id)
 );
@@ -116,6 +117,22 @@ def init_db() -> None:
                 "ALTER TABLE simulations ADD COLUMN persona_count INTEGER"
             )
             print("schema migration: persona_count column added to simulations")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass  # already migrated
+            else:
+                raise
+        # D1 (CONTRACTS §§37-40): per-persona voice_cadence — deterministic
+        # post-genesis tag steering opener structure. DEFAULT 'direct' ensures
+        # pre-D1 v7 rows have a well-formed cadence on read (the v7 system
+        # prompt's `or "direct"` fallback in _system_for_persona handles
+        # in-flight personas without the key; this default handles persisted
+        # rows from sims that ran before the migration). Idempotent.
+        try:
+            conn.execute(
+                "ALTER TABLE personas ADD COLUMN voice_cadence TEXT NOT NULL DEFAULT 'direct'"
+            )
+            print("schema migration: voice_cadence column added to personas")
         except sqlite3.OperationalError as e:
             if "duplicate column name" in str(e).lower():
                 pass  # already migrated
@@ -371,6 +388,10 @@ def insert_personas(sim_id: str, personas: list[dict[str, Any]]) -> None:
         hot_buttons = p.get("hot_buttons") or []
         if not isinstance(hot_buttons, list):
             hot_buttons = []
+        # D1: cadence is set by persona_genesis._assign_cadence on every path
+        # (validated + fallback). Default to "direct" defensively in case a
+        # caller bypasses genesis with a hand-rolled persona dict.
+        voice_cadence = p.get("voice_cadence") or "direct"
         rows.append(
             (
                 sim_id,
@@ -382,14 +403,15 @@ def insert_personas(sim_id: str, personas: list[dict[str, Any]]) -> None:
                 p.get("bio") or "",
                 p.get("profession"),
                 json.dumps(hot_buttons),
+                voice_cadence,
             )
         )
     with get_conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO personas "
             "(simulation_id, persona_id, name, handle, archetype, audience, "
-            "bio, profession, hot_buttons) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "bio, profession, hot_buttons, voice_cadence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
@@ -403,7 +425,7 @@ def get_personas(sim_id: str) -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT persona_id, name, handle, archetype, audience, bio, "
-            "profession, hot_buttons FROM personas "
+            "profession, hot_buttons, voice_cadence FROM personas "
             "WHERE simulation_id = ? ORDER BY persona_id",
             (sim_id,),
         ).fetchall()
@@ -425,6 +447,9 @@ def get_personas(sim_id: str) -> list[dict[str, Any]]:
                 "bio": row["bio"] or "",
                 "profession": row["profession"],
                 "hot_buttons": hot_buttons,
+                # D1: cadence persists across runs/replays; the column has
+                # DEFAULT 'direct' for any pre-D1 row without an explicit value.
+                "voice_cadence": row["voice_cadence"] or "direct",
             }
         )
     return out

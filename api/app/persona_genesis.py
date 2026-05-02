@@ -20,6 +20,7 @@ Z2 prompts must tolerate this gracefully.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -32,6 +33,42 @@ from .personas import (
     _alloc_counts,
     build_persona_pool,
 )
+
+# D1 (2026-05-02): voice cadence is the post-genesis, deterministic per-persona
+# opener-structure tag. Source of truth lives at api/app/swarm.py:VOICE_CADENCES;
+# we hard-code the same 7-tuple here to avoid a circular import (swarm.py
+# imports this module from inside run_simulation, and we keep the dependency
+# one-way at module-load time — see the deferred import in generate_persona_pool).
+# Keep these two tuples in sync: any change to swarm.VOICE_CADENCES MUST mirror
+# here, otherwise _assign_cadence will produce values _system_for_persona
+# rejects (it falls back to "direct" on unknown cadences, which silently
+# undoes the diversity push).
+_VOICE_CADENCES: tuple[str, ...] = (
+    "direct",
+    "interrogative",
+    "clipped",
+    "narrative",
+    "wry",
+    "analytical",
+    "emotional",
+)
+
+
+def _assign_cadence(persona_id: str) -> str:
+    """Deterministic per-persona cadence assignment.
+
+    Uses sha256 (NOT Python's built-in hash() — that's PYTHONHASHSEED-salted
+    per-process and would break replay parity) on the persona_id, takes the
+    first byte mod len(_VOICE_CADENCES). Same persona_id → same cadence on
+    every run, every replay. Uniform-ish across the 7-cadence enum.
+
+    Cadence is intentionally NOT an LLM-decided field: per the D-batch plan,
+    asking genesis to pick cadence risks the LLM correlating it with archetype
+    or profession and undoing the diversity push. Post-processing keeps it
+    uncorrelated by construction.
+    """
+    digest = hashlib.sha256(persona_id.encode()).digest()
+    return _VOICE_CADENCES[digest[0] % len(_VOICE_CADENCES)]
 
 log = logging.getLogger("echo.persona_genesis")
 
@@ -395,6 +432,11 @@ def _validate_pool(
         coerced["handle"] = handle
 
         coerced["persona_id"] = f"a{i + 1}"
+        # D1: deterministic post-genesis cadence assignment. Stamp AFTER
+        # persona_id is finalized so the sha256 derivation is stable across
+        # runs/replays. See _assign_cadence docstring for why this isn't an
+        # LLM-decided field.
+        coerced["voice_cadence"] = _assign_cadence(coerced["persona_id"])
         out.append(coerced)
 
     return out
@@ -433,6 +475,10 @@ def _fallback_pool(
                 "bio": "",
                 "profession": None,
                 "hot_buttons": [],
+                # D1: cadence assigned even on the deterministic fallback so
+                # the wire shape is uniform across paths and v7 sims that
+                # took the fallback still get cadence-diversified openers.
+                "voice_cadence": _assign_cadence(p.id),
             }
         )
     return out

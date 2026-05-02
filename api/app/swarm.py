@@ -2040,6 +2040,11 @@ def _aggregate_round_actions(
                 "bio": persona.get("bio") or "",
                 "profession": persona.get("profession"),
                 "hot_buttons": list(persona.get("hot_buttons") or []) or None,
+                # D1 (CONTRACTS §§37-40): per-persona cadence on the wire.
+                # Additive + FE-invisible — surfaced for debug/observability
+                # so we can correlate post text style with assigned cadence
+                # in the round_event payload. Optional/None-tolerant on read.
+                "voice_cadence": persona.get("voice_cadence") or None,
             }
             post = {
                 "id": post_id,
