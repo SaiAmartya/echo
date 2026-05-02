@@ -188,6 +188,25 @@ D0 added `_BANNED_OPENER_RE` mirroring `_SCHEMA_LEAK_PREFIX_RE` to strip leading
 
 **Rule:** prompt-side fixes go first; parser-side sanitizers exist only to catch leak-through. If the sanitizer fires often (target ≤1% of outputs), the prompt is still leaking and the regex is hiding it. Diagnostic counter on the sanitizer is the canary — wire it from day one.
 
+## L33 — Two LLM-decided fields on the same call can correlate even when conceptually orthogonal (G-batch perf gate failure)
+
+G-batch added a closed-enum `gif_reaction` field to the per-persona action JSON (alongside the existing `text` / `sentiment` / `voice_cadence`). Architecture treated `gif_reaction` and `text` sentiment as orthogonal axes — cadence shapes openers, gif shapes visual punctuation, sentiment shapes the take. The G3 perf gate ran 3 P6 calibration sims on the `experimental/gif-reactions` branch and observed:
+
+- **Canada invasion**: -0.472 vs gate ≤ -0.4 — PASS
+- **Notion calmer notifs**: -0.008 vs gate +0.05..+0.30 — **FAIL** (regressed -0.106 vs D-baseline +0.098)
+- **Schools 4-day weeks**: -0.403 vs gate -0.30..+0.10 — **FAIL** (regressed -0.097 vs D-baseline -0.306)
+
+Of the 7 tags the LLM reached for across the test sims, 6 were negative-leaning (`thinking, deep_sigh, suspicious, facepalm, head_shake, eye_roll`) and only `thumbs_up` was positive (1 occurrence in 145+ gif posts). The LLM was using `gif_reaction` as another sentiment signal — when picking a "skeptical" gif it also leaned the post text more negative, dragging mean sentiment ~0.1 below the D-baseline. P6 is sacred (Z-batch's load-bearing realism work), so a single-axis -0.1 drift is a hard fail.
+
+**Architectural lesson:** even when two LLM-decided fields are described as orthogonal in the prompt, the model implicitly correlates them at decode time. Closed enums don't prevent this — they prevent string drift, not value-correlation. Defenses that *do* work:
+1. **Tag-set composition matters.** A 25-tag set with ~6 positive, ~6 negative, ~13 neutral would have rebalanced the picker prior. The Echo set leaned ~50% negative-availability (eye_roll, deep_sigh, head_shake, facepalm, side_eye, suspicious, etc.). Even though positive/neutral tags exist in the enum (cheers, applause, thumbs_up, mind_blown, laughing, mic_drop, wave), their *salience* in the LLM's mental model was lower for contentious topics.
+2. **Sentiment-decoupling instruction.** A prompt rule like "your `gif_reaction` choice MUST be independent of post sentiment — pick whichever fits the post's mood, NOT another way to signal how you feel about it" might break the correlation. Untested in this run.
+3. **Deterministic post-processing.** D-batch's `voice_cadence` was sha256(persona_id) — uncorrelated with archetype/profession/bio/sentiment by construction. The same trick *could* work for gifs but would lose the "respond to the post text" win that's the whole point of LLM-decided GIFs.
+
+**Outcome:** branch `experimental/gif-reactions` is feature-complete (wire works, FE renders 21 glyphs in the DOM, replay parity holds, zero asset weight via emoji+CSS keyframes, all 9 perf-budget metrics PASS). One quality metric (P6) fails. Per the user's explicit "fun branch" framing — *"in case we mess anything up or if it impacts performance"* — branch stays unmerged on `experimental/gif-reactions`. Future iteration paths: rebalance tag composition (drop ~3 negative tags, add ~3 positive ones), or add the sentiment-decoupling instruction.
+
+**Rule:** when adding a new LLM-decided field to a multi-field action schema, audit the field's value-set distribution for correlation against existing fields BEFORE the perf gate. The gate caught it; the architecture review didn't.
+
 ---
 
 ## L18 — The pivot model: additive contracts, mode-aware prompts, default to the new front door

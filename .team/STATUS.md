@@ -120,3 +120,15 @@ For the hackathon ship this is acceptable — many production teams ship with wi
 | D (E2E full simulation) | ≤40 per run × 3 runs = 120 | — |
 | E (polish) | ≤40 × 2 runs = 80 | — |
 | **Hackathon ceiling** | **≤300 total** | — |
+
+## G-batch — Reaction GIFs (on `experimental/gif-reactions` branch) — 2026-05-02
+
+Per-persona reaction GIFs as a per-post `gif_reaction` enum tag. v0 renders emoji + CSS keyframes (zero asset weight). Branch-isolated per user request: *"we will be doing this in a separate fun branch — in case we mess anything up or if it impacts performance."*
+
+- [x] **G0** — branch `experimental/gif-reactions` off `main@07ea334`. CONTRACTS v11 §§41-45 LOCKED (gif_reaction enum + ECHO_GIFS_ENABLED flag + asset-agnostic FE rendering). Single commit 5b749a5.
+- [x] **G1** (backend-engineer-15) — `_PERSONA_ACTION_SCHEMA` enum, GIF HARD RULE in user prompt, `_parse_persona_action` validator, `_aggregate_round_actions` threading + 15% rarity cap, `ECHO_GIFS_ENABLED` env flag at module top. Side-fix: added `voice_cadence` to `ReplayAgent` (Pydantic 2 was silently stripping it from `/simulate/replay` — latent bug from D1, caught here). Single commit c808255.
+- [x] **G2** (frontend-engineer-16) — `ServerAgent.gif_reaction?: string | null` in api.ts. `TweetCard.tsx` ReactionGlyph component + 25-tag TAG_MAP + `phase === "done"` gate. 8 `echo-glyph-*` keyframes in globals.css. SwarmThread plumbs `gif_reaction` through ThreadEvent and both top-level + descendant TweetCard call sites. Single commit 1865234.
+- [x] **G3** (lead) — perf gate + integration verification. **9 of 10 gates PASS, 1 FAIL (P6 sentiment regression).** Branch stays unmerged per plan + user's branch-isolation request.
+  - PASS (9): wire delivers gif_reaction (14.0–14.1% across 3 P6 sims, all under cap), FE renders glyphs (verified 21 in DOM, 🤔 visible at 28px with wobble animation), replay parity, engine flag toggle, zero `*.gif` network requests (emoji+CSS), zero asset weight, ~3KB bundle delta, ~30 token LLM overhead, cost unchanged within rounding.
+  - FAIL (1): P6 sentiment — Canada -0.472 ≤ -0.4 PASS; Notion **-0.008** vs gate +0.05..+0.30 FAIL (regressed -0.106 vs D-baseline +0.098); Schools **-0.403** vs gate -0.30..+0.10 FAIL (regressed -0.097 vs D-baseline -0.306). Diagnosis in LEARNINGS L33: tag-set composition skewed negative (~6 of 7 most-picked tags are skeptical/frustrated), LLM correlated GIF picking with post sentiment despite the design treating them as orthogonal axes.
+  - **Decision: branch stays on `experimental/gif-reactions`. Not merged to main.** Iteration paths surfaced to user (rebalance tag composition or add sentiment-decoupling prompt rule). `main` remains clean at 07ea334 (D-batch shipped state).
