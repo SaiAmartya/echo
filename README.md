@@ -77,6 +77,62 @@ Holding off on the install means Step 1 can be tested without anyone having to r
 | `api/app/db.py` | SQLite helpers (`audiences`, `simulations`, `round_events`, `analyses`) |
 | `api/app/canned.py` | The hard-coded responses Step 1 returns |
 
+## Terminal UI (alternate interface)
+
+A Textual-based TUI in `api/tui.py` is an *alternate* interface to the GUI — a
+pure HTTP client over the same `/simulate/start`, `/simulate/stream` (SSE),
+and `/report` endpoints the web app uses. Useful for headless demos, slow
+networks, and tight feedback loops while iterating on the engine.
+
+### Run it
+
+```bash
+# 1. Backend must be up on :8000 (terminal 1)
+cd api && ./run.sh
+# Make sure FIREBASE_AUTH_DISABLED=1 is set in api/.env so the dev token works.
+
+# 2. Install + run the TUI (terminal 2)
+cd api && source .venv/bin/activate
+pip install -r requirements.txt   # picks up textual + httpx
+python -m api.tui
+```
+
+Backend base URL is read from `ECHO_API_BASE` (default `http://127.0.0.1:8000`).
+
+### What it does
+
+- **Compose** — pick mode (Hypothetical / Business · Notion sample), rounds
+  (5–15), persona count (30 / 50 / 75 / 100; the DEV-mode 17 pool is
+  selected server-side when `ECHO_DEV_MODE=1`), web-grounding toggle, and
+  type a draft (max 3500 chars).
+- **Simulate** — live SSE thread on the left (archetype glyph + handle +
+  sentiment indicator + `♥/↩` engagement), running room tallies on the right
+  (per-archetype reply counts + mean sentiment + `Round N of M · X replies`
+  topbar).
+- **Report** — full report from `POST /report`: executive summary, verdict
+  pill (`SHIP` / `REVISE` / `RETHINK`), audience reception cards per
+  archetype, risk vectors with severity coloring, numbered rewrite options,
+  and comparable discourse.
+
+### Keybindings
+
+| key | what |
+|---|---|
+| `q` | quit |
+| `n` | new simulation (back to Compose) |
+| `?` | help toast |
+| `ctrl+c` | hard quit |
+| `ctrl+r` | run (on Compose) |
+
+### Auth
+
+The TUI sends `Authorization: Bearer dev-local-token` on every HTTP call and
+adds `?token=dev-local-token` on the SSE stream (the api accepts SSE auth via
+query param because `EventSource` can't attach headers — see
+`api/app/auth.py`). The api accepts any token string when
+`FIREBASE_AUTH_DISABLED=1`. The TUI is a dev/demo tool — production auth is
+out of scope.
+
 ## What's intentionally *not* in Step 1
 
 Per `ACTION-PLAN.md`:
