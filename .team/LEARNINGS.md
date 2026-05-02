@@ -170,6 +170,24 @@ Fix: rewrite grounding system prompt with explicit "WHAT TO INCLUDE — load-bea
 
 **Rule:** when shipping a dev-bypass, grep for every caller of the underlying function being bypassed. Bypass at the provider is necessary; bypass at the callsites is sufficient.
 
+## L30 — Salient anchor words in system prompts get echoed verbatim
+
+D-batch root-cause: the v7 hypothetical-mode system prompt contained *"sometimes a hypothetical scenario someone is asking the public to weigh in on"*. The LLM treated **"hypothetical scenario"** as a salient semantic anchor and echoed it back as opener templates — *"okay i'm hearing 'hypothetical question'"*, *"yo, hypothetical question, sounds like…"* — across roughly 30%+ of posts. Fix: removed the anchor word entirely; the prompt now describes input by what the persona DOES (react to substance) rather than what the input IS (a hypothetical scenario). Plus an anti-echo HARD RULE in the user prompt forbidding restated framing. After: 0 hits on "hypothetical question" / "hypothetical scenario" across 346 posts.
+
+**Rule:** prompt language describing the input is read by the LLM as language to mirror. Describe the persona's action, not the input's category. If you must name the input type at all (e.g. "DRAFT POST" vs "SCENARIO" headers), keep it as a structural label, not embedded prose.
+
+## L31 — Per-persona structural variation must come from prompt scaffold, not sampling noise
+
+Same diagnosis as L30 but the second-order failure: at temp=0.95 with 50 personas sharing the same archetype-only voice prompt, openers converged because the prompt scaffold gave the LLM no orthogonal axis along which to differentiate. Bumping temperature would only have made the same opener template land in noisier flavors — incoherence, not diversity. Real fix: a closed-enum `voice_cadence` field (`direct, interrogative, clipped, narrative, wry, analytical, emotional`), deterministically sampled per persona via sha256 of persona_id, with a concrete per-cadence guide block injected into the system prompt. Each cadence steers OPENER STRUCTURE only — explicitly NOT a sentiment floor (P6 must hold under all 7).
+
+**Rule:** if all instances of an LLM call share the same prompt scaffold and you need diverse outputs, the diversification must enter the scaffold. Sampling noise diversifies word choice, not structure. Closed enum > free-form string (no drift). Deterministic-from-id > LLM-decided (no correlation with other persona attributes). Off-canon examples > domain-specific (no verbatim collision with user prompts — D2 caught "ground-breaking. revolutionary. unprecedented." being copied 2x out of 50 because the original guide example was too memorable).
+
+## L32 — Banned-prefix sanitizers are a safety net, not a fix
+
+D0 added `_BANNED_OPENER_RE` mirroring `_SCHEMA_LEAK_PREFIX_RE` to strip leading echoes IF they leaked through the prompt fix. With L30+L31 in place the sanitizer fired ~0 times across the post-D2 verification sims (the prompt fix did the work). Earlier in the session there was a temptation to lead with the sanitizer (regex-strip "hypothetical question") instead of fixing the prompt — that path was explicitly rejected by user constraint *"I don't think the solution is to ban this format completely"* and would have masked the underlying issue.
+
+**Rule:** prompt-side fixes go first; parser-side sanitizers exist only to catch leak-through. If the sanitizer fires often (target ≤1% of outputs), the prompt is still leaking and the regex is hiding it. Diagnostic counter on the sanitizer is the canary — wire it from day one.
+
 ---
 
 ## L18 — The pivot model: additive contracts, mode-aware prompts, default to the new front door

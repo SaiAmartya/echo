@@ -80,6 +80,20 @@ Updated by each agent after every meaningful task. One line per agent.
 - [x] **All Z-batch work shipped 2026-05-02.** L23-L29 appended to LEARNINGS.
   - [ ] **Z4** — Tuning + LEARNINGS (lead)
   - [ ] **Z5** — Ship
+
+## D-batch — Persona Voice Diversification ("De-template the Swarm") — 2026-05-02
+
+User flagged template-collapse: ~30%+ of v7 hypothetical posts opened with "okay i'm hearing 'hypothetical question'" / "yo, hypothetical question, sounds like…" variants. Root cause: salient anchor word in system prompt + no per-persona structural variation. Multi-pronged prompt-side cure shipped in 4 phases per `~/.claude/plans/melodic-mixing-sunset.md` (rev4).
+
+- [x] **D0** — CONTRACTS v10 §§37-40 LOCKED. Lead-driven prompt rewrites in `swarm.py`: removed "hypothetical scenario" anchor word from `_system_for_persona` (and v6 fallback `_system_for`); rewrote web-grounding framing word ("hypothetical" → "what-if"); added anti-echo HARD RULE in user prompt; introduced `VOICE_CADENCES` 7-tuple + `_VOICE_CADENCE_GUIDE` constant; expanded `_FEW_SHOT_ANCHOR` 3 scenarios × 3 examples with cadence tags + closing reminder; added `_BANNED_OPENER_RE` + `_strip_banned_openers` parser sanitizer (safety net) + diagnostic strip-counter. Single commit f7888ba.
+- [x] **D1** — `voice_cadence` field on `RichPersona` (deterministic sha256-of-persona_id sampling, NOT LLM-decided), `personas` table ALTER TABLE column with idempotent migration, `insert_personas`/`get_personas` roundtrip, `_aggregate_round_actions` plumbs cadence onto wire `agent.voice_cadence`. Delegated to backend-engineer-14, single commit fe3f0d8 after lead-applied scope-clean of an out-of-scope tui.py label tweak.
+- [x] **D2** — Verification + tuning pass. Initial run flagged P6 sentiment regression (-0.407 vs -0.30..+0.10 gate on schools prompt) AND verbatim-copy of cadence guide examples. Tune commit a4afcb7: rebalanced `_VOICE_CADENCE_GUIDE` with off-canon scenarios (recipes / jazz / hospital workflow / supplier audits — instead of education/policy/AI domains), mixed sentiment per cadence (positive + negative + neutral), added "DO NOT copy verbatim — internalize the SHAPE" preamble.
+  - **Final P6 (50p × 8r each):** Canada -0.578 PASSED (gate ≤ -0.4); Notion +0.098 PASSED (gate +0.05..+0.30); Schools -0.306 PASSED (boundary of gate -0.30..+0.10).
+  - **Leakage scan:** 0 hits across all 7 originally-collapsing phrases ("hypothetical question", "hypothetical scenario", "i'm hearing", "okay so we", and all 4 verbatim-copied D0 guide examples).
+  - **Opener diversity:** ~30+ distinct opener shapes across 50 personas. Mild residual: 2/50 echoes of "ground-breaking. revolutionary. unprecedented." and 2/50 of "the bottleneck moves upstream" — far below the ~30%+ original collapse, acceptable variance.
+- [x] **D3** — LEARNINGS L30 (salient anchor words get echoed), L31 (structural variation comes from scaffold not sampling), L32 (banned-prefix sanitizers are safety net not fix). STATUS updated. Single docs commit, push.
+
+**D-batch shipped 2026-05-02.** Single user-flagged regression converted into 4 phases, 4 commits (D0 + D1 + D2 tune + D3 docs), ~70 min wall time matching the plan's estimate. Root cause documented as L30; prompt-vs-sanitizer ordering documented as L32 for future template-collapse triage.
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
