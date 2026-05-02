@@ -25,3 +25,6 @@ api/echo.db-*
 
 # build artifacts
 *.tsbuildinfo
+
+# firebase service account credentials — never commit
+*firebase-adminsdk*.json

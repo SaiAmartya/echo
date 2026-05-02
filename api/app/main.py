@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Literal
@@ -26,6 +27,7 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import RedirectResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from sse_starlette.sse import EventSourceResponse  # noqa: E402
 
@@ -57,9 +59,14 @@ from .swarm import (  # noqa: E402
     get_report_lock,
     run_simulation,
 )
+from . import x_client, x_archetypes  # noqa: E402
+from . import x_oauth  # noqa: E402
+from .db import upsert_x_token, get_x_token, delete_x_token  # noqa: E402
 
 log = logging.getLogger("echo.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+_pkce_store: dict[str, str] = {}
 
 
 @asynccontextmanager
@@ -281,34 +288,138 @@ def _bad(status: int, code: str, detail: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"detail": detail, "code": code})
 
 
+@app.get("/x/login")
+async def x_login(uid: str = Depends(current_user_uid_from_query)) -> RedirectResponse:
+    verifier, challenge = x_oauth.make_pkce_pair()
+    state = x_oauth.make_state(uid)
+    _pkce_store[state] = verifier
+    url = x_oauth.build_authorize_url(state, challenge)
+    return RedirectResponse(url)
+
+
+@app.get("/x/callback")
+async def x_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+) -> RedirectResponse:
+    import time
+    import base64
+    import json as _json
+    try:
+        b64 = state.rsplit(".", 1)[0]
+        payload = _json.loads(base64.urlsafe_b64decode(b64 + "=="))
+        uid = payload["uid"]
+    except Exception:
+        raise _bad(400, "oauth_state_invalid", "Invalid OAuth state")
+
+    if not x_oauth.verify_state(state, uid):
+        raise _bad(400, "oauth_state_invalid", "OAuth state invalid or expired")
+
+    verifier = _pkce_store.pop(state, None)
+    if not verifier:
+        raise _bad(400, "oauth_state_invalid", "OAuth state not found — session may have expired")
+
+    try:
+        tokens = await x_oauth.exchange_code(code, verifier)
+    except Exception as exc:
+        log.warning("x_callback: token exchange failed: %r", exc)
+        raise _bad(502, "x_token_exchange_failed", "Failed to exchange OAuth code with X")
+
+    access_token = tokens["access_token"]
+    refresh = tokens.get("refresh_token")
+    expires_in = tokens.get("expires_in", 7200)
+    expires_at = int(time.time()) + expires_in
+
+    try:
+        me = await x_client.fetch_user_by_username_with_token(access_token)
+        handle = me.get("username", "")
+    except Exception:
+        handle = ""
+
+    upsert_x_token(uid, handle, access_token, refresh, expires_at)
+
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/compose?x=connected")
+
+
+@app.get("/x/status")
+async def x_status(uid: str = Depends(current_user_uid)) -> dict:
+    row = get_x_token(uid)
+    if not row:
+        return {"connected": False, "handle": None}
+    return {"connected": True, "handle": row["handle"]}
+
+
+@app.delete("/x/disconnect")
+async def x_disconnect(uid: str = Depends(current_user_uid)) -> dict:
+    delete_x_token(uid)
+    return {"ok": True}
+
+
 @app.post("/seed", response_model=SeedResponse)
-def seed(
+async def seed(
     req: SeedRequest,
     uid: str = Depends(current_user_uid),
 ) -> SeedResponse:
     if req.mode == "csv" and not (req.payload and req.payload.strip()):
         raise _bad(400, "bad_payload", "CSV payload required for mode=csv")
-    if req.mode == "oauth" and not (req.payload and req.payload.strip()):
-        raise _bad(401, "oauth_failed", "oauth token rejected")
 
     audience_id = f"aud_{uuid.uuid4().hex[:10]}"
+
     if req.mode == "oauth":
-        name = "X · @you"
-        size = 4182
+        import time
+        row = get_x_token(uid)
+        if not row:
+            raise _bad(401, "x_not_connected", "Connect your X account first via the 'Connect X' button")
+
+        access_token = row["access_token"]
+        if row["expires_at"] - time.time() < 60 and row.get("refresh_token"):
+            try:
+                refreshed = await x_oauth.refresh_token(row["refresh_token"])
+                expires_at = int(time.time()) + refreshed.get("expires_in", 7200)
+                upsert_x_token(uid, row["handle"], refreshed["access_token"], refreshed.get("refresh_token"), expires_at)
+                access_token = refreshed["access_token"]
+            except Exception as exc:
+                log.warning("x seed: token refresh failed: %r", exc)
+                raise _bad(401, "x_token_revoked", "X session expired — reconnect your account")
+
+        try:
+            me = await x_client.fetch_me(access_token)
+        except x_client.XAuthError:
+            raise _bad(401, "x_token_revoked", "X session expired — reconnect your account")
+        except x_client.XRateLimitError:
+            raise _bad(503, "x_rate_limited", "X API rate limit hit; try again in 15 minutes")
+        except x_client.XUpstreamError:
+            raise _bad(502, "x_upstream_unavailable", "X API unavailable; try again shortly")
+
+        user_id = me["id"]
+        handle = me.get("username", row["handle"])
+        followers_count = me.get("public_metrics", {}).get("followers_count", 0)
+
+        followers, following = await asyncio.gather(
+            x_client.fetch_followers_sample_with_token(user_id, access_token, n=100),
+            x_client.fetch_following_sample_with_token(user_id, access_token, n=100),
+        )
+        archetypes_list = x_archetypes.infer_archetypes(followers, following)
+        name = f"X · @{handle}"
+        size = max(followers_count, 1)
+
     elif req.mode == "csv":
         name = "Custom · uploaded"
         size = 1000
-    else:
+        archetypes_list = default_audience_archetypes()
+
+    else:  # sample
         name = "Notion · core"
         size = 8420
+        archetypes_list = default_audience_archetypes()
 
-    archetypes = default_audience_archetypes()
-    insert_audience(audience_id, uid, name, size, archetypes)
+    insert_audience(audience_id, uid, name, size, archetypes_list)
     return SeedResponse(
         audience_id=audience_id,
         name=name,
         size=size,
-        archetypes=[Archetype(**a) for a in archetypes],
+        archetypes=[Archetype(**a) for a in archetypes_list],
     )
 
 

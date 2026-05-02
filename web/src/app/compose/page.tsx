@@ -8,7 +8,7 @@ import { Frame, PageHeader, StepIndicator } from "@/components/Shell";
 import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
 import { Icon } from "@/components/ui/Primitives";
-import { api, ApiError, type Audience, type SimulationMode } from "@/lib/api";
+import { api, ApiError, type Audience, type SimulationMode, type XConnectionStatus } from "@/lib/api";
 import { RequireAuth } from "@/components/auth/RequireAuth";
 
 // v5 §20 — rounds range expanded to [5, 15]. Backend now 422s on rounds<5.
@@ -89,6 +89,8 @@ function ComposePageInner() {
   const [audience, setAudience] = useState<Audience | null>(null);
   const [mode, setMode] = useState<Mode>("hypothetical");
   const [webGrounding, setWebGrounding] = useState<boolean>(false);
+  const [xStatus, setXStatus] = useState<XConnectionStatus>({ connected: false, handle: null });
+  const [xStatusLoading, setXStatusLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // `hydrated` gates the persist-on-change effects so they don't run on the
@@ -134,6 +136,22 @@ function ComposePageInner() {
     window.sessionStorage.setItem(WEB_GROUNDING_STORAGE_KEY, webGrounding ? "1" : "0");
   }, [webGrounding, hydrated]);
 
+  useEffect(() => {
+    api.getXStatus()
+      .then(setXStatus)
+      .catch(() => {})
+      .finally(() => setXStatusLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("x") === "connected") {
+      api.getXStatus().then(setXStatus).catch(() => {});
+      window.history.replaceState({}, "", "/compose");
+    }
+  }, []);
+
   const onRun = async () => {
     if (submitting) return;
     setSubmitting(true);
@@ -150,11 +168,13 @@ function ComposePageInner() {
           web_grounding: webGrounding,
         });
       } else {
-        // Business: ensure we have an audience cached. If not, seed the sample
-        // audience inline (the Audience sidebar tab is gone in v4).
         let aud = audience;
-        if (!aud) {
-          aud = await api.seed({ mode: "sample", payload: null });
+        if (!aud || xStatus.connected) {
+          aud = await api.seed(
+            xStatus.connected
+              ? { mode: "oauth", payload: null }
+              : { mode: "sample", payload: null }
+          );
           window.sessionStorage.setItem("echo:audience", JSON.stringify(aud));
           setAudience(aud);
         }
@@ -287,6 +307,52 @@ function ComposePageInner() {
           {webGrounding ? "on" : "off"}
         </span>
       </button>
+      {mode === "business" && (
+        xStatus.connected ? (
+          <span
+            style={{
+              ...chipStyle,
+              background: "rgba(29,161,242,0.10)",
+              border: "1px solid rgba(29,161,242,0.40)",
+              color: "#1da1f2",
+              cursor: "pointer",
+            }}
+            onClick={() => {
+              api.xDisconnect().then(() => {
+                setXStatus({ connected: false, handle: null });
+                setAudience(null);
+              }).catch(() => {});
+            }}
+            title="Click to disconnect X account"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+            </svg>
+            <span style={{ fontSize: 12 }}>@{xStatus.handle}</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>✕</span>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={async () => {
+              const url = await api.xLoginUrl();
+              window.location.href = url;
+            }}
+            style={{
+              ...chipStyle,
+              cursor: "pointer",
+              background: xStatusLoading ? "var(--surface-2)" : "rgba(29,161,242,0.08)",
+              border: xStatusLoading ? "1px solid var(--border)" : "1px solid rgba(29,161,242,0.35)",
+              color: xStatusLoading ? "var(--fg-2)" : "#1da1f2",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+            </svg>
+            <span style={{ fontSize: 12 }}>{xStatusLoading ? "X" : "Connect X"}</span>
+          </button>
+        )
+      )}
     </span>
   );
 

@@ -334,6 +334,30 @@ export function generateReport(
   return postJson<ReportResponse>(`/api/report?${params.toString()}`, {});
 }
 
+export interface XConnectionStatus {
+  connected: boolean;
+  handle: string | null;
+}
+
+export function getXStatus(): Promise<XConnectionStatus> {
+  return getJson<XConnectionStatus>("/api/x/status");
+}
+
+export async function xLoginUrl(): Promise<string> {
+  const params = new URLSearchParams();
+  if (AUTH_DISABLED) {
+    params.set("token", DEV_BYPASS_TOKEN);
+  } else {
+    const token = await getCurrentIdToken();
+    if (token) params.set("token", token);
+  }
+  return `/api/x/login?${params.toString()}`;
+}
+
+export function xDisconnect(): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>("/api/x/disconnect", {});
+}
+
 export const api = {
   seed,
   simulateStart,
@@ -342,4 +366,7 @@ export const api = {
   getHistory,
   getReplay,
   generateReport,
+  getXStatus,
+  xLoginUrl,
+  xDisconnect,
 };

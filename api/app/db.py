@@ -121,6 +121,16 @@ def init_db() -> None:
                 pass  # already migrated
             else:
                 raise
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS x_tokens (
+                uid TEXT PRIMARY KEY,
+                handle TEXT,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
 
 
 @contextmanager
@@ -589,6 +599,36 @@ def list_simulations(user_id: str, limit: int) -> list[dict[str, Any]]:
                 }
             )
     return items
+
+
+def upsert_x_token(uid: str, handle: str, access_token: str, refresh_token: str | None, expires_at: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO x_tokens (uid, handle, access_token, refresh_token, expires_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(uid) DO UPDATE SET
+                 handle=excluded.handle,
+                 access_token=excluded.access_token,
+                 refresh_token=excluded.refresh_token,
+                 expires_at=excluded.expires_at""",
+            (uid, handle, access_token, refresh_token, expires_at),
+        )
+
+
+def get_x_token(uid: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT handle, access_token, refresh_token, expires_at FROM x_tokens WHERE uid=?",
+            (uid,),
+        ).fetchone()
+    if not row:
+        return None
+    return {"handle": row[0], "access_token": row[1], "refresh_token": row[2], "expires_at": row[3]}
+
+
+def delete_x_token(uid: str) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM x_tokens WHERE uid=?", (uid,))
 
 
 def get_simulation_full(sim_id: str, user_id: str) -> dict[str, Any] | None:
