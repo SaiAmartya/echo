@@ -2210,6 +2210,42 @@ def _enforce_gif_rarity_cap(
             agent["gif_reaction"] = None
 
 
+def _enforce_gif_per_tag_cap(
+    posts: list[dict[str, Any]], *, max_per_tag: int = 2
+) -> None:
+    """G4: cap the per-round occurrences of any single gif_reaction tag.
+
+    Mutate-in-place: if any tag appears more than `max_per_tag` times in this
+    round, randomly null out the surplus posts with that tag. Forces visual
+    variety — without this, a popular tag like 'thinking' or 'deep_sigh' can
+    dominate a round (the LLM has biases). User feedback 2026-05-02:
+    "prevent the same gif to appear many many times."
+
+    Runs AFTER `_enforce_gif_rarity_cap` so we operate on the already-capped
+    set. Pure mutation; idempotent on already-capped lists. No-op when
+    ECHO_GIFS_ENABLED is off (no gif_reactions to bucket).
+    """
+    if not posts or max_per_tag < 1:
+        return
+    # Bucket post indices by tag.
+    by_tag: dict[str, list[int]] = {}
+    for i, p in enumerate(posts):
+        tag = (p.get("agent") or {}).get("gif_reaction")
+        if tag:
+            by_tag.setdefault(tag, []).append(i)
+    surplus_indices: list[int] = []
+    for tag, indices in by_tag.items():
+        if len(indices) > max_per_tag:
+            import random  # local import — same pattern as rarity cap
+            surplus_indices.extend(
+                random.sample(indices, len(indices) - max_per_tag)
+            )
+    for i in surplus_indices:
+        agent = posts[i].get("agent")
+        if isinstance(agent, dict):
+            agent["gif_reaction"] = None
+
+
 def _apply_v7_engagement(
     cumulative: list[dict[str, Any]],
     *,
@@ -2602,6 +2638,12 @@ async def run_simulation(
             # No-op when ECHO_GIFS_ENABLED is off (no posts have gifs).
             if ECHO_GIFS_ENABLED:
                 _enforce_gif_rarity_cap(new_posts, max_ratio=0.15)
+                # G4: per-tag dedup cap. Forces visual variety — without this
+                # the LLM's bias toward a few favorite tags (thinking,
+                # deep_sigh, etc.) lets the same GIF appear 6+ times per round.
+                # Cap each unique tag at max_per_tag occurrences; randomly null
+                # the rest. Runs AFTER rarity cap so we operate on the kept set.
+                _enforce_gif_per_tag_cap(new_posts, max_per_tag=2)
                 # Mirror the cap into persistence_actions so replay matches.
                 # Build an id-set of posts that ended up null after the cap;
                 # a persistence_action is keyed by persona_id, so we resolve

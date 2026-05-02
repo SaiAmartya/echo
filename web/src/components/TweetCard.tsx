@@ -479,52 +479,123 @@ type GlyphAnim =
   | "bounce" | "wobble" | "pop" | "sway"
   | "pulse" | "clap"   | "shake" | "wave";
 
-const TAG_MAP: Record<string, { emoji: string; anim: GlyphAnim }> = {
-  eye_roll:     { emoji: "🙄", anim: "wobble" },
-  popcorn:      { emoji: "🍿", anim: "bounce" },
-  mind_blown:   { emoji: "🤯", anim: "pop" },
-  this_is_fine: { emoji: "🔥", anim: "sway" },
-  side_eye:     { emoji: "👀", anim: "pulse" },
-  slow_clap:    { emoji: "👏", anim: "clap" },
-  head_shake:   { emoji: "🤦", anim: "shake" },
-  shrug:        { emoji: "🤷", anim: "wobble" },
-  thumbs_up:    { emoji: "👍", anim: "pop" },
-  thumbs_down:  { emoji: "👎", anim: "pop" },
-  applause:     { emoji: "👏", anim: "clap" },
-  suspicious:   { emoji: "🧐", anim: "pulse" },
-  shocked:      { emoji: "😱", anim: "pop" },
-  deep_sigh:    { emoji: "😮‍💨", anim: "sway" },
-  mic_drop:     { emoji: "🎤", anim: "bounce" },
-  facepalm:     { emoji: "🤦", anim: "shake" },
-  laughing:     { emoji: "😂", anim: "bounce" },
-  crying:       { emoji: "😭", anim: "wobble" },
-  nervous:      { emoji: "😬", anim: "pulse" },
-  bored:        { emoji: "🥱", anim: "sway" },
-  cheers:       { emoji: "🥂", anim: "pop" },
-  point_up:     { emoji: "☝️", anim: "pop" },
-  no_thanks:    { emoji: "🙅", anim: "shake" },
-  thinking:     { emoji: "🤔", anim: "wobble" },
-  wave:         { emoji: "👋", anim: "wave" },
+// G4 (CONTRACTS v11 §42 hot-link path) — each tag maps to a Giphy CDN ID +
+// fallback emoji + CSS anim. ReactionGlyph hot-links the GIF from i.giphy.com
+// (NOT bundled in the repo); falls back to animated emoji on network error.
+//
+// Hot-linking is permitted under Giphy's Standard License: free use of GIFs
+// from giphy.com with attribution where appropriate. Attribution rendered as
+// a small "via Giphy" subscript on the glyph. We don't redistribute content;
+// we just embed Giphy's CDN URLs.
+//
+// IDs sourced 2026-05-02 by surfacing the first hit on giphy.com/search/<term>.
+// If Giphy ever takes a specific GIF down, the onError handler swaps to the
+// emoji fallback automatically — no broken-image icon.
+const TAG_MAP: Record<
+  string,
+  { emoji: string; anim: GlyphAnim; giphyId: string }
+> = {
+  eye_roll:     { emoji: "🙄",  anim: "wobble", giphyId: "eUrE2DuMKOE0g" },
+  popcorn:      { emoji: "🍿",  anim: "bounce", giphyId: "6pJNYBYSMFod2" },
+  mind_blown:   { emoji: "🤯",  anim: "pop",    giphyId: "75ZaxapnyMp2w" },
+  this_is_fine: { emoji: "🔥",  anim: "sway",   giphyId: "NTur7XlVDUdqM" },
+  side_eye:     { emoji: "👀",  anim: "pulse",  giphyId: "H5C8CevNMbpBqNqFjl" },
+  slow_clap:    { emoji: "👏",  anim: "clap",   giphyId: "9uoYC7cjcU6w8" },
+  head_shake:   { emoji: "🤦",  anim: "shake",  giphyId: "Ci3nCVx952lfG" },
+  shrug:        { emoji: "🤷",  anim: "wobble", giphyId: "jPAdK8Nfzzwt2" },
+  thumbs_up:    { emoji: "👍",  anim: "pop",    giphyId: "111ebonMs90YLu" },
+  thumbs_down:  { emoji: "👎",  anim: "pop",    giphyId: "1ScF5MuJRL4Os" },
+  applause:     { emoji: "👏",  anim: "clap",   giphyId: "DvWJHSOxTff84SQsD9" },
+  suspicious:   { emoji: "🧐",  anim: "pulse",  giphyId: "OwXMyUBbXezpG75UTR" },
+  shocked:      { emoji: "😱",  anim: "pop",    giphyId: "116a8zosxwA0SI" },
+  deep_sigh:    { emoji: "😮‍💨", anim: "sway",   giphyId: "15BuyagtKucHm" },
+  mic_drop:     { emoji: "🎤",  anim: "bounce", giphyId: "l0ExayQDzrI2xOb8A" },
+  facepalm:     { emoji: "🤦",  anim: "shake",  giphyId: "KIqHhQ1TLTEbu" },
+  laughing:     { emoji: "😂",  anim: "bounce", giphyId: "1BXa2alBjrCXC" },
+  crying:       { emoji: "😭",  anim: "wobble", giphyId: "G4Ihli2UThrBS" },
+  nervous:      { emoji: "😬",  anim: "pulse",  giphyId: "rq6c5xD7leHW8" },
+  bored:        { emoji: "🥱",  anim: "sway",   giphyId: "yziuK6WtDFMly" },
+  cheers:       { emoji: "🥂",  anim: "pop",    giphyId: "a5viI92PAF89q" },
+  point_up:     { emoji: "☝️",  anim: "pop",    giphyId: "uWZwiq9FadBCobkpJ5" },
+  no_thanks:    { emoji: "🙅",  anim: "shake",  giphyId: "spfi6nabVuq5y" },
+  thinking:     { emoji: "🤔",  anim: "wobble", giphyId: "Z9cRCMdAMzXi25dwhE" },
+  wave:         { emoji: "👋",  anim: "wave",   giphyId: "xT9IgG50Fb7Mi0prBC" },
 };
+
+// 100w variant balances quality (animated, ~100x115px) against bytes
+// (typically 50-300KB). Lazy-load means only on-screen GIFs hit the network.
+const giphyUrl = (id: string): string =>
+  `https://i.giphy.com/media/${id}/100w.gif`;
 
 function ReactionGlyph({ tag }: { tag: string }) {
   const entry = TAG_MAP[tag];
+  const [errored, setErrored] = useState(false);
   if (!entry) return null;
+
+  // Emoji fallback path — same shape as the original v0 glyph. Triggers when
+  // the Giphy hot-link fails (network error, Giphy down, GIF removed) so the
+  // post never renders a broken-image icon.
+  if (errored) {
+    return (
+      <span
+        role="img"
+        aria-label={tag.replace(/_/g, " ")}
+        style={{
+          display: "inline-block",
+          fontSize: 28,
+          marginTop: 6,
+          marginBottom: 2,
+          lineHeight: 1,
+          animation: `echo-glyph-${entry.anim} 1.6s ease-in-out infinite alternate`,
+          filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.25))",
+        }}
+      >
+        {entry.emoji}
+      </span>
+    );
+  }
+
   return (
     <span
       role="img"
       aria-label={tag.replace(/_/g, " ")}
       style={{
-        display: "inline-block",
-        fontSize: 28,
-        marginTop: 6,
-        marginBottom: 2,
-        lineHeight: 1,
-        animation: `echo-glyph-${entry.anim} 1.6s ease-in-out infinite alternate`,
-        filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.25))",
+        display: "inline-flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: 2,
+        marginTop: 8,
+        marginBottom: 4,
       }}
     >
-      {entry.emoji}
+      <img
+        src={giphyUrl(entry.giphyId)}
+        alt={tag.replace(/_/g, " ")}
+        loading="lazy"
+        decoding="async"
+        onError={() => setErrored(true)}
+        style={{
+          maxWidth: 180,
+          maxHeight: 160,
+          width: "auto",
+          height: "auto",
+          borderRadius: 10,
+          border: "1px solid var(--border)",
+          background: "var(--surface-2)",
+          display: "block",
+        }}
+      />
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 9,
+          color: "var(--fg-3)",
+          opacity: 0.55,
+          letterSpacing: "0.04em",
+        }}
+      >
+        via giphy
+      </span>
     </span>
   );
 }
