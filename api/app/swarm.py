@@ -940,18 +940,33 @@ async def _fetch_web_context(
         "person, product, model, event, or claim as fictional or generic.\n\n"
         "Your job: identify entities/events/claims in the input that may be "
         "recent (post-training-cutoff) or non-obvious, search the web for them, "
-        "and return a SHORT factual context blurb the downstream models can use "
-        "to react grounded in current reality.\n\n"
+        "and return a factual context blurb the downstream models can use to "
+        "react grounded in current reality.\n\n"
+        "WHAT TO INCLUDE — load-bearing for a REACTION simulation (not an "
+        "encyclopedia entry):\n"
+        "- Identify the entity (briefly — one short clause is enough).\n"
+        "- THEN: why it's being talked about — the SPECIFIC concerns, "
+        "controversies, risks, failure modes, hype angles, or stakeholder "
+        "tensions surrounding it. The downstream swarm needs to know what "
+        "people would actually be REACTING TO, not just what the entity is.\n"
+        "- If safety, security, ethical, regulatory, or societal-impact issues "
+        "are part of the public conversation about this entity/event, those are "
+        "the most load-bearing facts — surface them prominently.\n"
+        "- If the input is a hypothetical involving a real entity (e.g. 'what "
+        "if X did Y'), the context should explain why that hypothetical would "
+        "be alarming/exciting/divisive given what's actually known about X.\n\n"
         "OUTPUT RULES:\n"
         "- Plain text only. No markdown, no headings, no citations, no URLs.\n"
-        "- 2-5 sentences total, ≤450 characters total.\n"
-        "- Lead with the most load-bearing fact (what the entity IS, when it "
-        "happened, key impact). Skip framing like 'Here is context:'.\n"
-        "- If nothing in the input requires fresh context (it's evergreen / "
-        "obviously hypothetical / has no real-world referents), return the "
-        "single word: NONE.\n"
-        "- Do NOT take a stance, do NOT predict reactions, do NOT moralize. "
-        "Facts only — the swarm forms its own opinions."
+        "- 4-8 sentences. Aim for ~600-1000 characters — enough to include the "
+        "controversy/risk angle, not so long it bloats every downstream prompt.\n"
+        "- Skip framing like 'Here is context:' — start directly with the facts.\n"
+        "- If nothing in the input requires fresh context (it's evergreen, "
+        "obviously fictional, or has no real-world referents the search would "
+        "surface), return the single word: NONE.\n"
+        "- Do NOT take a stance, do NOT predict crowd reactions, do NOT moralize. "
+        "But DO report what concerns/excitement/disagreement actually exists in "
+        "public discourse — those are facts the downstream swarm needs.\n"
+        "- Facts only — the swarm forms its own opinions."
     )
     user = f'Input ({framing}):\n"""\n{draft}\n"""\n\nReturn the context blurb (or NONE).'
 
@@ -961,7 +976,11 @@ async def _fetch_web_context(
             config = genai_types.GenerateContentConfig(
                 system_instruction=system,
                 temperature=0.2,
-                max_output_tokens=512,
+                # Z9 (lead 2026-05-02): bumped 512 → 1024 because the
+                # earlier output truncated mid-sentence at ~70 chars while
+                # building the entity definition — never reaching the risk /
+                # controversy angle the simulation actually needs to react to.
+                max_output_tokens=1024,
                 tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
             )
         except Exception as exc:  # noqa: BLE001 — older SDK shape mismatch
@@ -1000,9 +1019,15 @@ async def _fetch_web_context(
         text = re.sub(r"^```(?:[a-zA-Z]+)?\s*|\s*```$", "", text, flags=re.S).strip()
     if text.upper() == "NONE":
         return ""
-    # Hard cap so we don't bloat every downstream prompt.
-    if len(text) > 600:
-        text = text[:600].rstrip() + "…"
+    # Hard cap so we don't bloat every downstream prompt. Z9 (lead 2026-05-02):
+    # raised 600 → 1200 to admit the risk/controversy angle without wedging the
+    # per-archetype/per-persona prompts (still well under 1500 chars total
+    # system-prompt overhead).
+    if len(text) > 1200:
+        text = text[:1200].rstrip() + "…"
+    # Z9 diagnostic (lead 2026-05-02): log the actual context blurb so we can
+    # tell whether thin output is a search-quality issue or a prompt-cap issue.
+    log.info("web_grounding context (%d chars): %s", len(text), text)
     return text
 
 
