@@ -16,6 +16,16 @@ import {
 } from "@/lib/api";
 
 const DEFAULT_ROUNDS = 5;
+// Minimum visible time per round so the user actually sees the swarm map
+// populate cluster-by-cluster, the thread fill in, and the dogpile rings
+// animate. Server cadence is ~1.5s/round under Gemini, but we pace defensively
+// in the FE so a fast model (or a future optimization) doesn't collapse the
+// signature visualization into a blink. See debugger commit message for why.
+const MIN_ROUND_VISIBLE_MS = 1200;
+// After receiving `event: done`, wait this long before navigating to /results
+// so the user sees the completed swarm settle. Without this the redirect fires
+// the same frame the final round paints.
+const DONE_LINGER_MS = 2000;
 
 interface ErrorState {
   code: string;
@@ -65,6 +75,17 @@ function SimulatingInner() {
   const [draft, setDraft] = useState(SEED_DRAFT);
   const sourceRef = useRef<EventSource | null>(null);
 
+  // Paced ingest. Server can deliver round events back-to-back when the LLM is
+  // hot or short — instead of letting React batch them into a single render
+  // (which makes /simulating look broken), we queue and drain at a minimum
+  // 1.2s cadence. `doneSeen` is a flag so the drain loop knows when there's
+  // no more inbound work and it's safe to schedule the linger + redirect.
+  const queueRef = useRef<RoundEvent[]>([]);
+  const doneSeenRef = useRef(false);
+  const lastAppliedAtRef = useRef(0);
+  const drainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Pull initial total rounds from sessionStorage if present (so the topbar
   // doesn't briefly say "of 5" when the user picked 3).
   useEffect(() => {
@@ -84,22 +105,75 @@ function SimulatingInner() {
     const es = new EventSource(url);
     sourceRef.current = es;
 
+    // Reset pacing state on (re)mount.
+    queueRef.current = [];
+    doneSeenRef.current = false;
+    lastAppliedAtRef.current = 0;
+    if (drainTimerRef.current) clearTimeout(drainTimerRef.current);
+    if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+
+    const finishWithLinger = () => {
+      if (redirectTimerRef.current) return;          // already scheduled
+      setRunning(false);
+      setDone(true);
+      es.close();
+      sourceRef.current = null;
+      // Linger so the user sees the final round + completed swarm settle.
+      redirectTimerRef.current = setTimeout(() => {
+        router.push(`/results?id=${encodeURIComponent(id)}`);
+      }, DONE_LINGER_MS);
+    };
+
+    const drain = () => {
+      drainTimerRef.current = null;
+      const next = queueRef.current.shift();
+      if (next) {
+        setRound(next.round);
+        setMaxRounds(next.of);
+        setPosts(next.posts);
+        lastAppliedAtRef.current = Date.now();
+        // Schedule the next drain. If the queue already has more items, wait
+        // the full minimum gap. If it's empty, we'll be re-armed by onRound.
+        if (queueRef.current.length > 0) {
+          drainTimerRef.current = setTimeout(drain, MIN_ROUND_VISIBLE_MS);
+        } else if (doneSeenRef.current) {
+          // No more rounds inbound and stream closed — finish.
+          // Honor MIN_ROUND_VISIBLE_MS for the just-applied round before linger.
+          drainTimerRef.current = setTimeout(finishWithLinger, MIN_ROUND_VISIBLE_MS);
+        }
+        return;
+      }
+      // Queue empty.
+      if (doneSeenRef.current) finishWithLinger();
+    };
+
+    const scheduleDrain = () => {
+      if (drainTimerRef.current) return;             // already armed
+      const since = Date.now() - lastAppliedAtRef.current;
+      const wait = lastAppliedAtRef.current === 0
+        ? 0                                          // first round paints immediately
+        : Math.max(0, MIN_ROUND_VISIBLE_MS - since);
+      drainTimerRef.current = setTimeout(drain, wait);
+    };
+
     const onRound = (ev: MessageEvent<string>) => {
       try {
         const data = JSON.parse(ev.data) as RoundEvent;
-        setRound(data.round);
-        setMaxRounds(data.of);
-        setPosts(data.posts);
+        queueRef.current.push(data);
+        scheduleDrain();
       } catch {
         // ignore malformed payload — server will close the stream if it's bad
       }
     };
 
     const onDone = () => {
-      setRunning(false);
-      setDone(true);
+      doneSeenRef.current = true;
       es.close();
-      router.push(`/results?id=${encodeURIComponent(id)}`);
+      // If queue is empty AND no drain is pending, finish now (with linger).
+      // Otherwise the drain loop will call finishWithLinger when it empties.
+      if (queueRef.current.length === 0 && !drainTimerRef.current) {
+        finishWithLinger();
+      }
     };
 
     const onErrorEvent = (ev: MessageEvent<string>) => {
@@ -111,12 +185,16 @@ function SimulatingInner() {
       }
       setRunning(false);
       es.close();
+      if (drainTimerRef.current) {
+        clearTimeout(drainTimerRef.current);
+        drainTimerRef.current = null;
+      }
     };
 
     const onConnectionError = () => {
       // EventSource native error (network drop, server closed without `error` event).
       // If we already saw `done` or a server-emitted error, leave state alone.
-      if (es.readyState === EventSource.CLOSED && !error && !done) {
+      if (es.readyState === EventSource.CLOSED && !error && !done && !doneSeenRef.current) {
         setError({ code: "internal_error", message: "Connection to simulation closed unexpectedly." });
         setRunning(false);
       }
@@ -133,6 +211,14 @@ function SimulatingInner() {
     return () => {
       es.close();
       sourceRef.current = null;
+      if (drainTimerRef.current) {
+        clearTimeout(drainTimerRef.current);
+        drainTimerRef.current = null;
+      }
+      if (redirectTimerRef.current) {
+        clearTimeout(redirectTimerRef.current);
+        redirectTimerRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, router]);
@@ -140,6 +226,14 @@ function SimulatingInner() {
   const onPause = () => {
     setRunning(false);
     sourceRef.current?.close();
+    if (drainTimerRef.current) {
+      clearTimeout(drainTimerRef.current);
+      drainTimerRef.current = null;
+    }
+    if (redirectTimerRef.current) {
+      clearTimeout(redirectTimerRef.current);
+      redirectTimerRef.current = null;
+    }
   };
 
   const onRetry = () => {

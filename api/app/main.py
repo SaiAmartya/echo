@@ -11,6 +11,7 @@ api/app/swarm.py — this module is the thin HTTP layer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -182,12 +183,18 @@ async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceRespons
                     payload = {"simulation_id": simulation_id, **data}
                     upsert_analysis(simulation_id, payload)
                     # Don't emit to client — sentinel for persistence only.
+                    continue  # skip the sleep — nothing to flush
                 elif event_name == "done":
                     yield {"event": "done", "data": json.dumps(data)}
                 elif event_name == "error":
                     yield {"event": "error", "data": json.dumps(data)}
                 else:
                     yield {"event": event_name, "data": json.dumps(data)}
+                # Yield control back to the loop so sse-starlette can flush this
+                # frame to the wire before the next round's gather() blocks.
+                # Defensive: sse-starlette 2.x already flushes per-yield, but
+                # this prevents any host/proxy coalescing during fast rounds.
+                await asyncio.sleep(0)
         except Exception as exc:  # noqa: BLE001
             log.exception("event_gen crashed: %r", exc)
             yield {
@@ -197,7 +204,17 @@ async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceRespons
                 ),
             }
 
-    return EventSourceResponse(event_gen())
+    # X-Accel-Buffering=no tells nginx (and any nginx-flavored proxy) to disable
+    # response buffering on this stream; Cache-Control no-transform stops gzip
+    # middleware from coalescing events. Verified harmless against Next.js's
+    # rewrite proxy (measured live during this fix).
+    return EventSourceResponse(
+        event_gen(),
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache, no-transform",
+        },
+    )
 
 
 @app.get("/analyze", response_model=AnalyzeResponse)
