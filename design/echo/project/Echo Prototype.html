@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echo — Web App Prototype</title>
+<link rel="stylesheet" href="lib/colors_and_type.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #f0eee9; }
+  #root { height: 100%; }
+
+  @keyframes echo-pulse  { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.4); opacity: 0.55; } }
+  @keyframes echo-ripple { 0% { transform: scale(0.6); opacity: 0.5; } 100% { transform: scale(1.15); opacity: 0; } }
+
+  .echo-frame *::-webkit-scrollbar { width: 6px; height: 6px; }
+  .echo-frame *::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 999px; }
+  .echo-frame *::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<script type="text/babel" src="lib/Primitives.jsx"></script>
+<script type="text/babel" src="lib/Sidebar.jsx"></script>
+<script type="text/babel" src="lib/Composer.jsx"></script>
+<script type="text/babel" src="lib/SwarmThread.jsx"></script>
+<script type="text/babel" src="lib/views.jsx"></script>
+<script type="text/babel" src="lib/AuthModal.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "dark",
+  "accent": "lime"
+}/*EDITMODE-END*/;
+
+const ACCENT_PRESETS = {
+  lime:  { '--accent-200': '#d4ff5c', '--accent-300': '#b8e83a', '--accent-fg': '#0a0c00' },
+  amber: { '--accent-200': '#ffd25c', '--accent-300': '#e8b75a', '--accent-fg': '#1a1100' },
+  coral: { '--accent-200': '#ff9a7d', '--accent-300': '#f06c5a', '--accent-fg': '#1a0905' },
+  sage:  { '--accent-200': '#a7e4b5', '--accent-300': '#7dd49a', '--accent-fg': '#06170d' },
+};
+
+// LiveRounds — drives a perpetual round loop on the simulating artboard.
+function LiveRounds() {
+  const [round, setRound] = React.useState(1);
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      setRound((r) => (r >= 5 ? 1 : r + 1));
+    }, 2400);
+    return () => clearInterval(id);
+  }, []);
+  return <View03_Rounds currentRound={round} running={true} />;
+}
+
+function useApplyTweaks(t) {
+  React.useEffect(() => {
+    document.documentElement.dataset.theme = t.theme === 'light' ? 'light' : '';
+    const preset = ACCENT_PRESETS[t.accent] || ACCENT_PRESETS.lime;
+    Object.entries(preset).forEach(([k, v]) => document.documentElement.style.setProperty(k, v));
+  }, [t.theme, t.accent]);
+}
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  useApplyTweaks(t);
+
+  const wrap = (node) => <div className="echo-frame" style={{ width: '100%', height: '100%' }}>{node}</div>;
+
+  return (
+    <>
+      <DesignCanvas>
+        <DCSection id="setup" title="Setup · Seed the audience" subtitle="The persona pool comes from PDFs, X, or a brief">
+          <DCArtboard id="seed" label="01 · Seed audience" width={1280} height={800} screenLabel="01 Seed">
+            {wrap(<View01_Seed />)}
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="run" title="Run · Compose → Rounds → Analysis" subtitle="The core swarm-intelligence flow">
+          <DCArtboard id="compose"  label="02 · Compose"  width={1280} height={800} screenLabel="02 Compose">
+            {wrap(<View02_Compose />)}
+          </DCArtboard>
+          <DCArtboard id="rounds"   label="03 · Rounds · live swarm" width={1280} height={800} screenLabel="03 Rounds">
+            {wrap(<LiveRounds />)}
+          </DCArtboard>
+          <DCArtboard id="rounds-end" label="03b · Rounds complete" width={1280} height={800} screenLabel="03b Rounds complete">
+            {wrap(<View03_Rounds currentRound={5} running={false} />)}
+          </DCArtboard>
+          <DCArtboard id="analysis" label="04 · Analysis" width={1280} height={800} screenLabel="04 Analysis">
+            {wrap(<View04_Analysis />)}
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="account" title="Account" subtitle="Returning-user surface">
+          <DCArtboard id="auth" label="00 · Sign in" width={1280} height={800} screenLabel="00 Auth">
+            {wrap(<View06_Auth />)}
+          </DCArtboard>
+          <DCArtboard id="history" label="05 · History" width={1280} height={800} screenLabel="05 History">
+            {wrap(<View05_History />)}
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel>
+        <div style={{
+          fontSize: 11, color: 'rgba(41,38,27,.6)', lineHeight: 1.4,
+          padding: '4px 0 2px', borderBottom: '.5px solid rgba(0,0,0,.08)',
+          marginBottom: 4,
+        }}>
+          Review-time tweaks. <b>Not shipped to production.</b>
+        </div>
+        <TweakSection label="Theme" />
+        <TweakRadio label="Mode" value={t.theme}
+          options={['dark', 'light']}
+          onChange={(v) => setTweak('theme', v)} />
+        <TweakRadio label="Accent" value={t.accent}
+          options={['lime', 'amber', 'coral', 'sage']}
+          onChange={(v) => setTweak('accent', v)} />
+      </TweaksPanel>
+    </>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

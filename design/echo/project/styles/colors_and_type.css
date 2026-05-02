@@ -1,0 +1,256 @@
+/* =========================================================================
+   Echo — Colors & Type
+   Dark-first. Raycast-adjacent: soft contrast, slight warmth, lime accent.
+   ========================================================================= */
+
+/* ---- Web fonts (Google Fonts substitutions; flagged in README) ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
+
+:root {
+  /* ---------------------------------------------------------------------
+     COLOR — Neutrals
+     A warm-tinted neutral ramp. Not pure black; #0b0b0c base has a hint
+     of warmth so the lime accent feels intentional, not radioactive.
+     --------------------------------------------------------------------- */
+  --neutral-0:   #070708;   /* page background, deepest */
+  --neutral-50:  #0b0b0c;   /* app surface */
+  --neutral-100: #111113;   /* card / panel */
+  --neutral-150: #161618;   /* raised card */
+  --neutral-200: #1c1c1f;   /* hover surface */
+  --neutral-300: #232327;   /* border subtle */
+  --neutral-400: #2e2e34;   /* border default */
+  --neutral-500: #43434b;   /* border strong / disabled fg */
+  --neutral-600: #6b6b75;   /* fg tertiary */
+  --neutral-700: #95959f;   /* fg secondary */
+  --neutral-800: #c4c4cb;   /* fg primary muted */
+  --neutral-900: #ededf0;   /* fg primary */
+  --neutral-1000: #fafafa;  /* fg max */
+
+  /* ---------------------------------------------------------------------
+     COLOR — Accent (lime)
+     One accent. Used for the predicted-good signal, primary CTA on dark,
+     and the active state of the simulation pulse.
+     --------------------------------------------------------------------- */
+  --accent-50:  #f4ffd6;
+  --accent-100: #e6ff9c;
+  --accent-200: #d4ff5c;   /* primary accent */
+  --accent-300: #b8e83a;
+  --accent-400: #94c121;
+  --accent-500: #6e9112;
+  --accent-600: #4d670c;
+
+  /* ---------------------------------------------------------------------
+     COLOR — Semantic (sentiment readouts)
+     Echo's whole job is reading the room — sentiment colors are core.
+     Desaturated so they read as quiet UI signals, not marketing splashes.
+     --------------------------------------------------------------------- */
+  --positive:    #7dd49a;   /* approvals, low-risk */
+  --positive-bg: #1a2620;
+  --neutral-fg:  #b8b8c0;   /* mixed / neutral replies */
+  --neutral-bg:  #1a1a1d;
+  --caution:     #e8b75a;   /* mild ratio risk */
+  --caution-bg:  #2a2316;
+  --danger:      #f06c5a;   /* high ratio risk */
+  --danger-bg:   #2a1815;
+
+  /* ---------------------------------------------------------------------
+     COLOR — Foreground / Background semantic aliases
+     --------------------------------------------------------------------- */
+  --bg:        var(--neutral-50);
+  --bg-deep:   var(--neutral-0);
+  --surface:   var(--neutral-100);
+  --surface-2: var(--neutral-150);
+  --surface-3: var(--neutral-200);
+
+  --fg:        var(--neutral-900);
+  --fg-1:      var(--neutral-900);
+  --fg-2:      var(--neutral-700);
+  --fg-3:      var(--neutral-600);
+  --fg-4:      var(--neutral-500);
+
+  --border:        var(--neutral-300);
+  --border-strong: var(--neutral-400);
+
+  --accent:    var(--accent-200);
+  --accent-fg: #0a0c00;     /* text on lime — near-black */
+
+  /* ---------------------------------------------------------------------
+     TYPE — Families
+     Geist (geometric grotesk, modern, neutral)
+     Geist Mono (for handles, counts, predicted reply previews)
+     Instrument Serif (occasional editorial accent — taglines, big quotes)
+     --------------------------------------------------------------------- */
+  --font-sans:  'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:  'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-serif: 'Instrument Serif', ui-serif, Georgia, serif;
+
+  /* ---------------------------------------------------------------------
+     TYPE — Scale (rem-based; 1rem = 16px)
+     --------------------------------------------------------------------- */
+  --fs-display: 56px;
+  --fs-h1: 40px;
+  --fs-h2: 28px;
+  --fs-h3: 20px;
+  --fs-h4: 16px;
+  --fs-body: 14px;
+  --fs-small: 13px;
+  --fs-micro: 12px;
+
+  --lh-tight: 1.05;
+  --lh-snug: 1.2;
+  --lh-normal: 1.45;
+  --lh-loose: 1.6;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+
+  /* ---------------------------------------------------------------------
+     SPACING / RADII / SHADOW
+     --------------------------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  --radius-1: 4px;
+  --radius-2: 6px;
+  --radius-3: 8px;
+  --radius-4: 12px;
+  --radius-5: 16px;
+  --radius-pill: 999px;
+
+  /* Shadows are subtle on dark surfaces; lift comes from a 1px hairline + a soft drop. */
+  --shadow-1: 0 1px 0 0 rgba(255,255,255,0.04) inset, 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-2: 0 1px 0 0 rgba(255,255,255,0.05) inset, 0 4px 16px rgba(0,0,0,0.45);
+  --shadow-3: 0 1px 0 0 rgba(255,255,255,0.06) inset, 0 12px 40px rgba(0,0,0,0.55);
+  --shadow-focus: 0 0 0 2px var(--accent-200), 0 0 0 4px rgba(212,255,92,0.18);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 400ms;
+}
+
+/* ---- Light theme (alt) -------------------------------------------------- */
+:root[data-theme="light"] {
+  --bg:        #fafaf9;
+  --bg-deep:   #f3f3f1;
+  --surface:   #ffffff;
+  --surface-2: #fafaf9;
+  --surface-3: #f3f3f1;
+
+  --fg-1: #0d0d0e;
+  --fg-2: #4a4a52;
+  --fg-3: #6e6e78;
+  --fg-4: #a3a3ad;
+
+  --border: #ececea;
+  --border-strong: #d6d6d2;
+
+  --accent: var(--accent-300);
+  --accent-fg: #0a0c00;
+}
+
+/* =========================================================================
+   SEMANTIC TYPE — apply directly to elements
+   ========================================================================= */
+html, body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  color: var(--fg-1);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.t-display {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-display);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight);
+}
+
+.t-display-serif {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-style: italic;
+  font-size: var(--fs-display);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
+}
+
+h1, .t-h1 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-h1);
+  line-height: var(--lh-snug);
+  letter-spacing: var(--tracking-tight);
+  color: var(--fg-1);
+}
+
+h2, .t-h2 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-h2);
+  line-height: var(--lh-snug);
+  letter-spacing: -0.01em;
+  color: var(--fg-1);
+}
+
+h3, .t-h3 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-h3);
+  line-height: 1.3;
+  color: var(--fg-1);
+}
+
+h4, .t-h4 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-h4);
+  line-height: 1.4;
+  color: var(--fg-1);
+}
+
+p, .t-body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  color: var(--fg-2);
+}
+
+.t-small {
+  font-size: var(--fs-small);
+  color: var(--fg-2);
+}
+
+.t-micro {
+  font-size: var(--fs-micro);
+  color: var(--fg-3);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+code, .t-mono, .t-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  font-feature-settings: "ss01", "cv11";
+}
+
+.t-handle {
+  font-family: var(--font-mono);
+  color: var(--fg-3);
+  font-size: var(--fs-small);
+}
