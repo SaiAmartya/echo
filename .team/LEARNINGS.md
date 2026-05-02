@@ -126,6 +126,52 @@ Q3 needed organic-feeling like counts and probability of likes per post — but 
 
 **Rule:** when adding FE-only animation state that must survive replay, derive it deterministically from a stable identifier already in the post payload — don't pipe new state through the SSE/replay contracts.
 
+## L23 — Per-persona LLM agents beat archetype-batched at the same call cost-class
+
+Z2 swapped from "6 archetype batches per round" (v6) to "50 personas × 1 call per round" (v7). Same wire contract. ~5× call count (50p×8r ≈ 400 vs v6's 92). What it bought: traceable persona→post linkage. Toronto line cook talks housing crisis, Accra pharmacist talks drug supply chains, Cape Town QA engineer talks cross-border internet — the bio shows up in the prose. v6's "200 agents" was 6 voices wearing 200 name-tags; v7 produces actual independent voices.
+
+**Rule:** if your simulation needs personality variance to feel real, the LLM call-shape must be 1-call-per-personality, not N-personalities-per-batched-call. Token cost scales linearly; quality of variance scales superlinearly.
+
+## L24 — LLM-generated state survives replay only if you persist the LLM's output
+
+Z2 made `like_count` LLM-derived (each persona's call returns `likes_given: [post_ids]` — real engagement decisions, not deterministic algorithm). Replay parity then requires persisting the per-persona action payloads in `round_events.payload` so replay re-renders from disk, never re-running the LLM. Without persistence, replay = nondeterministic = useless for "watch my sim again."
+
+**Rule:** L22 says "derive deterministically from a stable id" — that works for *FE-only* state. For LLM-generated state, the analog is "persist the LLM's output verbatim and replay from storage." Either deterministic input → output, or input → output → DB → replay.
+
+## L25 — A loading banner is not optional UX when an LLM call gates everything
+
+Z8 was triggered by user reporting web grounding "got stuck for 22 seconds." It was never stuck — the grounding LLM call took 17-22s before round 1 could begin streaming, with zero SSE traffic during that window. Adding `event: grounding` (status: searching/done/skipped/failed) gave the FE a banner to render. Bug went from "looks broken" to "looks like a Google search bar."
+
+**Rule:** any time an LLM call ≥3s gates user-visible output, emit a status event the FE can bind to. Silence reads as a hang in any UX.
+
+## L26 — Power-law engagement matters more than realistic per-post engagement
+
+Z6 found: with 50 personas each granting up to 5 likes/round across 8 rounds, every post got 30-80 likes. Realistic per-post (each persona DID like that post organically), but UNRELALISTIC at the thread level — real social media has a runaway top + a long tail of zeros. Fix was a Zipfian post-pass transform: top 10% × 5x amplifier, bottom 50% × 0.3 dampener. After Z6: top-1 = 1700, median = 0, bottom = 0. Suddenly the thread reads like Twitter.
+
+**Rule:** engagement realism is a DISTRIBUTION property, not a per-post property. Even if every individual like is "earned," the aggregate shape can be wrong. Apply a transform.
+
+## L27 — Schema-name leaks need defense at parse-time, not just prompt-time
+
+Z4 user-reported screenshot: a v7 reply rendered as `replying_to: p6\nif we're talking invasion…` — the LLM echoed a JSON schema field name into the text body. Adding "do NOT include field names in text" to the prompt is necessary but insufficient (LLMs sometimes leak even with the rule). Real fix: regex strip `(replying_to|likes_given|sentiment|action|text):value` prefixes at parse time, bounded to ~3 iterations so we don't accidentally eat real reactions starting with words like "action."
+
+**Rule:** model-misbehavior bugs need both a prompt fix (instructive, prevents most cases) AND a parser-level sanitizer (defensive, catches the residue). Don't trust the prompt to be 100%.
+
+## L28 — Grounding prompts must request the controversy angle, not the entity definition
+
+Z9: "If Claude released Mythos to public" → grounding produced 71 chars of *"Claude Mythos is a frontier AI model announced by Anthropic in April 20…"* (cut mid-word). Sterile entity definition. The simulation reacted with generic "untested model" boilerplate because the load-bearing facts (Project Glasswing, zero-day exploit risk, catastrophic-risk safety thresholds) never made it into the context.
+
+Fix: rewrite grounding system prompt with explicit "WHAT TO INCLUDE — load-bearing for a REACTION simulation (not an encyclopedia entry)" block requesting controversy/risk/stakeholder-tension angles. Bumped output from ≤450 → ~600-1000 chars and max_output_tokens from 512 → 1024. New context for the same prompt: 740 chars including Project Glasswing + zero-day + catastrophic-risk surfacing.
+
+**Rule:** when the downstream task is "react to this," the upstream context must report what people are reacting TO. "What it is" is one short clause; "why it's controversial" is the rest.
+
+## L29 — Auth bypass needs to mirror at every callsite, not just the provider
+
+`NEXT_PUBLIC_DISABLE_AUTH=1` (commit 4014d15) set the AuthProvider state to a dev user — but `api.ts` imported `getCurrentIdToken` from firebase/auth.ts directly, bypassing the provider, so every API call hit 401 in bypass mode. Fix: bypass check in `authHeaders()` AND `simulateStreamUrl()`, returning the same `dev-local-token` literal AuthProvider uses. One token, three callsites, single mental model.
+
+**Rule:** when shipping a dev-bypass, grep for every caller of the underlying function being bypassed. Bypass at the provider is necessary; bypass at the callsites is sufficient.
+
+---
+
 ## L18 — The pivot model: additive contracts, mode-aware prompts, default to the new front door
 
 Pivoting from "social-post pre-flight for marketing" to "what will people think if..." worked because we:

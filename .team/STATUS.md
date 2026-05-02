@@ -71,9 +71,13 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **Z3** — Frontend persona surfacing (commit 95d0c63, pushed). Avatar hover tooltip with persona bio + profession.
   - [x] **FE auth-bypass** — `NEXT_PUBLIC_DISABLE_AUTH=1` (commit 4014d15, pushed). Lead-shipped follow-up to unblock dev without Firebase sign-in.
   - [x] **Z6** — Power-law engagement + ECHO_DEV_MODE (commit cf2e411, pushed). 5/5 tests, lead-live-verified.
-  - [ ] **Z7** — Long-thread reply truncation UI (queued post-Z3+Z6).
-  - [ ] **Z4** — Tuning + LEARNINGS (lead) — also catches `replying_to: p6` schema-leak.
-  - [ ] **TUI** — Alternate interface (Task #31, in flight) — HTTP-client refactor of PR #1.
+  - [x] **TUI** — Alternate interface (commit b1f39b4, pushed). HTTP-client refactor of PR #1.
+  - [x] **Z8** — Web-grounding loading state: SSE event + UI banner (commits 26ba689 BE, 44bc793 FE). 25s timeout. Banner pulses during search.
+  - [x] **Z9** — Grounding context quality (commit c6ada58). 71-char entity-definition → 740-char controversy-aware (Project Glasswing + zero-day risk surfaces).
+  - [x] **Z7** — Long-thread reply truncation (commit 411ef56). First child + faded second + "Expand N more" pill. Survives R2 re-sort.
+  - [x] **Z4** — Schema-leak parser sanitizer + prompt hard rule (commit edb0c67). 3 P6 scenarios re-verified live: Canada -0.584/rethink, Notion +0.314/ship, Schools -0.162/rethink. Diversity smell test passed (5 distinct humans in Notion sim — Bay-area dev, Iowa HVAC, Phoenix SAH parent, Berlin architect, Maine retired prof).
+  - [x] **UI cleanup** — Drop quota meter + history risk-filter pills (commit 10a2e33).
+- [x] **All Z-batch work shipped 2026-05-02.** L23-L29 appended to LEARNINGS.
   - [ ] **Z4** — Tuning + LEARNINGS (lead)
   - [ ] **Z5** — Ship
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
