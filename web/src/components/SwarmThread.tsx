@@ -75,6 +75,11 @@ type ThreadEvent = {
   text: string;
   like_count: number;
   reply_count: number;
+  // G2 (CONTRACTS §41) — per-post reaction tag (closed-enum string).
+  // Sourced from the wire's per-post `agent.gif_reaction` so each turn carries
+  // its own glyph. Optional/nullable: pre-G sims and replays without the
+  // field render no glyph (TweetCard's ReactionGlyph returns null on absent).
+  gif_reaction?: string | null;
 };
 
 export type { ServerPost };
@@ -116,6 +121,10 @@ function normalize(
     id: p.id, round: p.round, parent: p.parent, agent: p.agent.id,
     sentiment: p.sentiment, text: p.text,
     like_count: p.like_count ?? 0, reply_count: p.reply_count ?? 0,
+    // G2 — pull per-post tag off the wire-side agent block (CONTRACTS §41).
+    // The persona registry is deduped by id so this can't live there; per-
+    // post is the right home for a per-turn reaction.
+    gif_reaction: p.agent.gif_reaction ?? null,
   }));
   const seen = new Set<string>();
   const agents: Agent[] = [];
@@ -407,6 +416,7 @@ function ThreadColumn({
                   sentiment: group.top.sentiment,
                   like_count: group.top.like_count,
                   reply_count: group.top.reply_count,
+                  gif_reaction: group.top.gif_reaction,
                 }}
                 agent={{
                   id: topAgent.id,
@@ -490,6 +500,7 @@ function ThreadColumn({
                             sentiment: d.sentiment,
                             like_count: d.like_count,
                             reply_count: d.reply_count,
+                            gif_reaction: d.gif_reaction,
                           }}
                           agent={{
                             id: ag.id,

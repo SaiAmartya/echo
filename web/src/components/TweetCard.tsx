@@ -64,6 +64,11 @@ export interface TweetCardPost {
   // v6 §21 — wire-supplied engagement counts. Both default 0.
   like_count: number;
   reply_count: number;
+  // v11 §41-42 (G-batch) — per-post reaction tag. v0 renders an emoji + CSS
+  // keyframe via ReactionGlyph below; the wire shape leaves room for a v1
+  // static-GIF upgrade (`<img src="/gifs/<tag>.gif">`) without a contract
+  // change. Null/undefined → no glyph rendered.
+  gif_reaction?: string | null;
 }
 
 export interface TweetCardAgent {
@@ -309,6 +314,13 @@ function TweetCardImpl({
             {bodyContent}
           </div>
 
+          {/* G2 — per-post reaction glyph. Only renders when wire has a
+              non-null gif_reaction AND the typing animation is done (otherwise
+              the glyph appears before the post even finishes "typing"). */}
+          {post.gif_reaction && phase === "done" && (
+            <ReactionGlyph tag={post.gif_reaction} />
+          )}
+
           <div
             style={{
               display: "flex",
@@ -454,6 +466,65 @@ function TypingDots() {
       <span className="echo-typing-dot" />
       <span className="echo-typing-dot" />
       <span className="echo-typing-dot" />
+    </span>
+  );
+}
+
+// G2 (CONTRACTS v11 §§41-42) — closed-enum tag → emoji + CSS animation map.
+// 25 canonical tags, some animations shared (the emoji carries the
+// differentiation). Keyframes live in globals.css as `echo-glyph-<anim>`.
+// Unknown tags fall through to a null render so a future contract drift
+// doesn't crash the FE.
+type GlyphAnim =
+  | "bounce" | "wobble" | "pop" | "sway"
+  | "pulse" | "clap"   | "shake" | "wave";
+
+const TAG_MAP: Record<string, { emoji: string; anim: GlyphAnim }> = {
+  eye_roll:     { emoji: "🙄", anim: "wobble" },
+  popcorn:      { emoji: "🍿", anim: "bounce" },
+  mind_blown:   { emoji: "🤯", anim: "pop" },
+  this_is_fine: { emoji: "🔥", anim: "sway" },
+  side_eye:     { emoji: "👀", anim: "pulse" },
+  slow_clap:    { emoji: "👏", anim: "clap" },
+  head_shake:   { emoji: "🤦", anim: "shake" },
+  shrug:        { emoji: "🤷", anim: "wobble" },
+  thumbs_up:    { emoji: "👍", anim: "pop" },
+  thumbs_down:  { emoji: "👎", anim: "pop" },
+  applause:     { emoji: "👏", anim: "clap" },
+  suspicious:   { emoji: "🧐", anim: "pulse" },
+  shocked:      { emoji: "😱", anim: "pop" },
+  deep_sigh:    { emoji: "😮‍💨", anim: "sway" },
+  mic_drop:     { emoji: "🎤", anim: "bounce" },
+  facepalm:     { emoji: "🤦", anim: "shake" },
+  laughing:     { emoji: "😂", anim: "bounce" },
+  crying:       { emoji: "😭", anim: "wobble" },
+  nervous:      { emoji: "😬", anim: "pulse" },
+  bored:        { emoji: "🥱", anim: "sway" },
+  cheers:       { emoji: "🥂", anim: "pop" },
+  point_up:     { emoji: "☝️", anim: "pop" },
+  no_thanks:    { emoji: "🙅", anim: "shake" },
+  thinking:     { emoji: "🤔", anim: "wobble" },
+  wave:         { emoji: "👋", anim: "wave" },
+};
+
+function ReactionGlyph({ tag }: { tag: string }) {
+  const entry = TAG_MAP[tag];
+  if (!entry) return null;
+  return (
+    <span
+      role="img"
+      aria-label={tag.replace(/_/g, " ")}
+      style={{
+        display: "inline-block",
+        fontSize: 28,
+        marginTop: 6,
+        marginBottom: 2,
+        lineHeight: 1,
+        animation: `echo-glyph-${entry.anim} 1.6s ease-in-out infinite alternate`,
+        filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.25))",
+      }}
+    >
+      {entry.emoji}
     </span>
   );
 }

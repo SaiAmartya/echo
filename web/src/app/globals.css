@@ -162,6 +162,48 @@ html, body {
   100% { transform: scale(1); }
 }
 
+/* ---- G2 (CONTRACTS v11 §§41-42): per-post reaction glyph keyframes -------
+   Subtle 1.5-2s loops keyed off `echo-glyph-<anim>`. Used by ReactionGlyph in
+   TweetCard.tsx. Some tags share an animation (the emoji differentiates).
+   `infinite alternate` is applied at the use-site (ReactionGlyph style).
+   Intentionally low-amplitude so the glyph reads as a beat of personality,
+   not a strobe. */
+@keyframes echo-glyph-bounce {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+@keyframes echo-glyph-wobble {
+  0%, 100% { transform: rotate(-6deg); }
+  50%      { transform: rotate(6deg); }
+}
+@keyframes echo-glyph-pop {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.18); }
+}
+@keyframes echo-glyph-sway {
+  0%, 100% { transform: translateX(0); }
+  50%      { transform: translateX(3px); }
+}
+@keyframes echo-glyph-pulse {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 1; }
+}
+@keyframes echo-glyph-clap {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  25%      { transform: scale(1.1) rotate(-8deg); }
+  75%      { transform: scale(1.1) rotate(8deg); }
+}
+@keyframes echo-glyph-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-2px); }
+  40%, 80% { transform: translateX(2px); }
+}
+@keyframes echo-glyph-wave {
+  0%, 100% { transform: rotate(0deg); }
+  25%      { transform: rotate(-15deg); }
+  75%      { transform: rotate(15deg); }
+}
+
 /* Z8 — gentle opacity-only pulse for the web-grounding banner icon while
    status="searching". Distinct from echo-pulse (which scales) so the icon
    stays visually still. */

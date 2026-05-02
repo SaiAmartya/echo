@@ -67,6 +67,10 @@ export interface ServerAgent {
   bio?: string;
   profession?: string | null;
   hot_buttons?: string[] | null;
+  // v11 §41-42 (G-batch) — per-post reaction tag picked by the persona on
+  // each turn. Closed enum of 25 tags (see ReactionGlyph TAG_MAP). Optional/
+  // nullable: pre-G sims and replays without the field render no glyph.
+  gif_reaction?: string | null;
 }
 
 export interface ServerPost {
