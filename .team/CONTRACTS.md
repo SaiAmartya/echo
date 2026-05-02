@@ -706,3 +706,50 @@ Cadence is read from the persisted `personas` table, not re-sampled at replay ti
 ---
 
 **v10 LOCKED — 2026-05-02.** Implementation: D0 (lead — prompt rewrites + sanitizer + few-shot expansion), D1 (BE — persona_genesis + DB), D2 (lead — verification + P6 regression check), D3 (lead — LEARNINGS).
+
+---
+
+## v11 (LOCKED on `experimental/gif-reactions` branch — 2026-05-02): persona reaction GIFs
+
+User asked to add reaction GIFs to the swarm on a separate "fun" branch — main stays untouched until a perf gate passes. v11 adds a closed-enum `gif_reaction` field that personas optionally pick on each post. The wire shape is asset-agnostic: the FE may render a static `<img>` from `/gifs/<tag>.gif` OR an emoji + CSS keyframe animation looked up from a tag→animation map. v0 ships emoji + CSS for zero asset weight, zero bundle delta, and crisp rendering at any scale; static GIF files are a reserved upgrade path the user can populate later.
+
+### § 41. `gif_reaction: string | null` field on persona action JSON (NEW, additive, optional)
+
+Closed enum, 25 tags:
+
+```
+eye_roll, popcorn, mind_blown, this_is_fine, side_eye, slow_clap, head_shake, shrug,
+thumbs_up, thumbs_down, applause, suspicious, shocked, deep_sigh, mic_drop, facepalm,
+laughing, crying, nervous, bored, cheers, point_up, no_thanks, thinking, wave
+```
+
+- LLM-decided per persona action via the `_PERSONA_ACTION_SCHEMA` enum constraint (Gemini honors enum values; out-of-enum drops to null at parse time).
+- Frequency budget: prompt nudge ("default to null, ~1-in-10 posts") + parse-time rarity cap (≤15% of posts per round; randomly null out the surplus).
+- Persisted in `round_events.payload.persona_actions[*].gif_reaction` (existing v7 persistence path).
+- Surfaced on the wire as `agent.gif_reaction?: string | null` on the post agent block (mirrors how D1's `voice_cadence` surfaces).
+
+### § 42. FE rendering convention (asset-agnostic)
+
+The FE owns the visual interpretation of the tag. v0 ships an **emoji + CSS keyframe animation map** keyed by tag — each of the 25 tags maps to a unicode emoji + a named animation (bounce, wobble, spin, pulse, shake, sway). Rendered as a small inline span between body text and action row in `TweetCard.tsx`, ~32-36px font-size, animation looped.
+
+**Reserved upgrade path**: if `web/public/gifs/<tag>.gif` exists, the FE may switch to `<img src="/gifs/<tag>.gif" loading="lazy">` instead. Static-GIF rendering is OUT OF SCOPE for v0 but the wire shape supports it without any code change.
+
+### § 43. Engine flag `ECHO_GIFS_ENABLED`
+
+- Default `1` on `experimental/gif-reactions` branch.
+- Default `0` if the branch ever merges to `main` (kill-switch even after merge — flip to `1` to enable).
+- When `0`: the schema field is absent from the spec, the prompt rule is absent, the aggregator passes through `None` everywhere. FE still tolerates a null/absent field gracefully.
+
+### § 44. Replay parity
+
+`gif_reaction` persists in `round_events.payload` and reads back verbatim on `/simulate/replay`. Pre-G sims have null/absent on read → FE skips render. v6 sims unaffected.
+
+### § 45. Backward compat
+
+- Wire shape v1-v10 preserved. v11 is strictly additive.
+- Old FE that doesn't render the field works unchanged (the field is just ignored).
+- New FE tolerates the field's absence (pre-G sims, ECHO_GIFS_ENABLED=0, v6 replays).
+
+---
+
+**v11 LOCKED — 2026-05-02 on `experimental/gif-reactions`.** Implementation: G0 (lead — branch + contracts), G1 (BE agent — schema + parser + aggregator + flag), G2 (FE agent — emoji+CSS render slot), G3 (lead — perf gate + merge decision). **`main` stays untouched until perf gate passes AND user OKs the merge.**
