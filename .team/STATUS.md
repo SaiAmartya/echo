@@ -27,6 +27,8 @@ Updated by each agent after every meaningful task. One line per agent.
 | frontend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 06:30 | Q3 done (commit 4b20857) — X-style tweet cards, word-by-word typing reveal, organic archetype-weighted likes, 1.8s ± jitter pacing, room graph dimmed to 60/40, hydration warning fixed, mulberry32-seeded PRNG for replay parity. 76.8 avg fps at rounds=15 (well above 50 gate). GIF captured to ~/Downloads/q3_thread_reveal.gif. Despawned. |
 | backend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:55 | R1 done (commit 13bb725) — engagement engine: 6×6 archetype affinity matrix, deterministic mulberry-equivalent likes seeded by (sim_id, post_id, round), smarter prior_top by engagement DESC + long-tail discovery. 7/7 verifications green; viral-take-attracts-dunks pattern surfaced (e.g. enthusiast p5 score=447 attracted skeptic dunks in r4/r5). Zero new LLM calls — budget unchanged. Despawned. |
 | frontend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 07:00 | R2 done (commit 37335b0) — parent-child tree rendering with level-1 indent + vertical thread line; FLIP-based engagement-DESC re-sort animation (600ms cubic-bezier, "thread settles" vibe) on report-pending phase; TweetCard drops cosmetic mulberry32, consumes wire like_count/reply_count with growth-detected heart-pop. 8/8 Chrome MCP verifications, GIF captured at ~/Downloads/r2_engagement_sort.gif (2.7MB, 14s). 213 posts initial render in 265ms. Despawned. |
+| frontend-engineer-9 (opus, general-purpose) | ✅ done | 2026-05-02 07:30 | S1 done (commit 79109b9) — inline report panel: extracted ReportBody + ReportSidePanel, /simulating phase machine adds "ready" (no more redirect), subtle fullscreen icon top-right, /history click → /simulating replay. 10/10 Chrome MCP verifications, GIF at ~/Downloads/s1_inline_report.gif (5.3MB, 27 frames). Despawned. |
+| backend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 07:35 | T1 done (commit 36e726a) — minor divisive-content bias: `_sentiment_resonance` peak 0.7→0.8 (extreme posts closer to peak, |s|=1.0 lifts +0.094); attach_engagement post-pass controversy multiplier (≤+15% on posts whose ≥2 children disagree in sign). Module-top constants `_SENT_RESONANCE_PEAK` + `_CONTROVERSY_BONUS_MAX` for dialing. 4/4 scenarios verified — P6 calibration intact (Canada -0.494, Notion +0.135, schools -0.215, athletes -0.089). Determinism preserved. Despawned. |
 
 ## Phase tracker
 
@@ -53,6 +55,8 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **CONTRACTS v6 §§21-24** locked (commit f4d0ce3, pushed) — like_count + reply_count on Post; deterministic per (sim_id, post_id, round); smarter prior_top by engagement.
   - [x] **R1** — engagement engine in swarm.py (commit 13bb725, pushed). 7/7 verifications.
   - [x] **R2** — indented thread tree + FLIP engagement-DESC re-sort (commit 37335b0, pushed). 8/8 Chrome MCP verifications + GIF.
+- [x] **S1** — Inline report panel + subtle fullscreen toggle (commit 79109b9, pushed). 10/10 Chrome MCP verifications + GIF (~/Downloads/s1_inline_report.gif).
+- [x] **T1** — Minor divisive-content bias in engagement algorithm (commit 36e726a, pushed). 4/4 scenarios verified, P6 realism preserved.
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
