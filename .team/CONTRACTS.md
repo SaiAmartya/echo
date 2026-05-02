@@ -327,3 +327,107 @@ Return the final persisted state of a completed simulation as one JSON payload �
 ---
 
 **v2 LOCKED — 2026-05-02.** All v1 shapes preserved. Implementations land in Phase E.
+
+---
+
+# v3 — analysis quality + full report (2026-05-02)
+
+**v3 is purely additive + a single field range expansion.** All v1 + v2 shapes remain LOCKED. Three changes:
+
+1. **Draft length cap raised: 280 → 3500 characters.** PR posts, product launches, LinkedIn long-form, Twitter/X premium posts all fit comfortably under 3500. Backend `Field(max_length=3500)` on `/simulate/start.draft`. Frontend Composer counter shows `{len} / 3500`. Visual styling unchanged.
+
+2. **Analysis call upgraded to Gemini 3 Flash Thinking.** Per-archetype reaction calls **stay on `gemini-2.5-flash-lite`** (they're cheap and fine; user explicitly approved keeping these). Only the final aggregate analysis call swaps to the thinking model so it can fit the full thread (≤1M context) and produce accurate findings. The exact model ID MUST be verified via Context7's `query-docs` for `google-genai` or WebSearch (current date: May 2026) before implementation — do not hardcode from memory. New env var: `GEMINI_ANALYSIS_MODEL` (defaults to whatever the verification confirms, e.g. `gemini-3-flash-thinking` or the equivalent dated ID).
+
+3. **Full report endpoint + page.** New deliverable inspired by MiroFish's ReportAgent: a multi-section, scrollable, editorial-tone report on how the public will receive the post. One Gemini-3-thinking call, fed the entire thread + draft + audience metadata. Counts as 1 call (still under the per-sim budget of 40, since a sim has ≤31 + this 1 = ≤32). Cached in a new `reports` table — calling twice for the same sim returns the cached report unless `?regenerate=1`.
+
+## 12. POST /report?simulation_id=…
+
+Generate (or fetch cached) a full-page report on the simulation.
+
+**Request:** query param `simulation_id` (required). Optional query param `regenerate` (bool, default false) — when true, force a fresh Gemini call and overwrite the cached row.
+
+**200 response:**
+
+```ts
+{
+  "simulation_id": string,
+  "draft":         string,
+  "audience_label": string,            // e.g. "Notion · core"
+  "rounds":        number,
+  "post_count":    number,
+  "generated_at":  string,             // ISO-8601 UTC of last generation
+  "model":         string,              // exact model id used (e.g. "gemini-3-flash-thinking-2026-…")
+  "report": {
+    "executive_summary":  string,                    // 3-5 sentences, the headline take
+    "verdict":            "ship" | "revise" | "rethink",
+                                                     // top-level recommendation
+    "verdict_rationale":  string,                    // 1-2 sentences explaining verdict
+    "audience_reception": [
+      {
+        "archetype": "skeptic"|"enthusiast"|"curious"|"practitioner"|"pedant"|"lurker",
+        "tone":      "positive"|"caution"|"danger"|"neutral",
+        "summary":   string,                         // 2-3 sentences on how this archetype received it
+        "representative_quote": string               // a direct lift from one of their posts (≤200 chars)
+      },
+      ...                                             // exactly 6 entries, one per archetype
+    ],
+    "risk_vectors": [
+      {
+        "label":     string,                          // ≤30 char tag, e.g. "Cadence credibility"
+        "severity":  "low"|"medium"|"high",
+        "detail":    string                           // 2-3 sentences
+      },
+      ...                                              // 2-4 items
+    ],
+    "rewrite_options": [
+      {
+        "label":   string,                            // ≤30 chars, e.g. "Softer framing"
+        "text":    string,                            // ≤500 chars; the actual rewrite
+        "rationale": string                           // 1-2 sentences on why this rewrite addresses what
+      },
+      ...                                              // 2-3 items
+    ],
+    "comparable_discourse": string                    // 2-3 sentences referencing similar real-world reactions; may be empty string if model declines
+  }
+}
+```
+
+**Errors:**
+
+| Status | code | When |
+|---|---|---|
+| 404 | `unknown_simulation` | id not in DB |
+| 409 | `report_pending` | another /report call is currently in-flight for this sim (concurrency guard) |
+| 502 | `gemini_unavailable` | upstream model 5xx / auth fail |
+| 500 | `internal_error` | unexpected |
+
+**Cost:** 1 Gemini call per generation. Total per-sim budget remains ≤40 (typical sim ≤32 with report).
+
+**Latency:** thinking model is slower than Flash-Lite — expect 5-20s. Frontend shows a "Generating full report…" loading state.
+
+## 13. Frontend integration crib (additions)
+
+- **`/results` page:** add a third footer button — "**See full report**" (variant=primary, `icon={<Icon name="zap" size={13}/>}` or similar) right of "Use rewrite". On click, route to `/report?id=${simulation_id}`.
+- **NEW `/report?id=…` page:** dedicated full-page route. On mount, `POST /api/report?simulation_id=…`. Show a generation spinner if first time (~5-20s). When response lands, render the structured report sections in a long scrollable column with the existing app shell (sidebar + topbar). Topbar reads "Full report". The report is the page — no extra chrome. Add a "Regenerate" ghost button that POSTs with `?regenerate=1` and a "Back to results" ghost button.
+- **Compose char limit:** raise the visible counter ceiling from 280 to 3500. Counter turns red past 3500, not 280.
+
+## 14. Backend integration crib (additions)
+
+- **`api/app/db.py`**: add `reports` table on init: `(simulation_id PK, payload TEXT, model TEXT, generated_at TEXT)`. Add helpers `get_report(sim_id) -> dict | None`, `upsert_report(sim_id, payload, model)`.
+- **`api/app/swarm.py`**: split the gemini call layer into two model targets. Keep `_call_gemini` for Flash-Lite (per-archetype reactions). Add `_call_gemini_thinking` for the thinking model. Both share the BudgetCounter and the process-global semaphore. The analysis function (currently last call inside `run_simulation`) switches to `_call_gemini_thinking`. Add a new `generate_report(sim_id) -> dict` function that loads the persisted thread + draft + audience, builds a long prompt with the full thread, calls thinking-model once with `response_schema` matching §12's `report` shape, persists, returns.
+- **`api/app/main.py`**: add `POST /report` route per §12. Concurrency guard via an in-process dict `{sim_id: asyncio.Lock}` so concurrent calls for the same sim queue, not duplicate. Return cached report if `regenerate=False` AND a row exists.
+- **Increase draft cap:** `SimulateStartRequest.draft = Field(min_length=1, max_length=3500)`.
+
+## 15. Model verification (R1, MANDATORY)
+
+The Gemini 3 Flash Thinking model ID must be confirmed via:
+- **Context7 `mcp__claude_ai_Context7__query-docs`** for `google-genai` (Python SDK), looking for thinking-mode model strings.
+- **OR WebSearch** with current year (May 2026) for "gemini 3 flash thinking model id google ai".
+
+The implementing agent MUST cite the source they verified against in their commit message (e.g. "verified `gemini-3-flash-thinking-001` via Context7 google-genai docs 2026-05-02"). Do NOT pick a model ID from training-data memory — Gemini's lineup has shifted multiple times and we need the live truth.
+
+If the thinking model is unavailable / costs prohibitively / latency is unacceptable (>30s p95), document it in `.team/inbox/gemini-3-thinking-unavailable.md` and message team-lead — do NOT silently fall back to a different model.
+
+---
+
+**v3 LOCKED — 2026-05-02.** All v1 + v2 shapes preserved. Implementations land in Phase F.
