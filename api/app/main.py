@@ -319,7 +319,8 @@ async def simulate_stream(
     # v4 (CONTRACTS §§16-19): hypothetical-mode sims weren't bound to a user
     # audience profile — short-circuit to GENERAL_PUBLIC_AUDIENCE so /simulate/stream
     # works without a real row in the audiences table.
-    sim_mode = sim.get("mode") if sim.get("mode") in ("business", "hypothetical") else "business"
+    _raw_mode = sim.get("mode")
+    sim_mode: str = _raw_mode if _raw_mode in ("business", "hypothetical") else "business"
     if sim_mode == "hypothetical":
         audience = GENERAL_PUBLIC_AUDIENCE
     else:
