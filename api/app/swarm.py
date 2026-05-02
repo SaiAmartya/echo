@@ -207,13 +207,26 @@ class BudgetExceededError(RuntimeError):
     """Raised when a Gemini call would exceed the per-sim budget."""
 
 
+# Process-global concurrency cap on Gemini calls. Per RULES.md R2 ("≤6
+# concurrent calls via asyncio.Semaphore(6) (process-global)"), this is shared
+# across ALL in-flight simulations — two parallel sims do NOT each get 6 slots.
+# Lazy-initialised so it's bound to the running event loop, not import-time.
+_GLOBAL_SEMA: asyncio.Semaphore | None = None
+
+
+def _global_sema() -> asyncio.Semaphore:
+    global _GLOBAL_SEMA
+    if _GLOBAL_SEMA is None:
+        _GLOBAL_SEMA = asyncio.Semaphore(MAX_CONCURRENT)
+    return _GLOBAL_SEMA
+
+
 @dataclass
 class BudgetCounter:
+    """Per-simulation call counter. Concurrency uses the process-global sema."""
+
     max_calls: int = MAX_LLM_CALLS
     used: int = 0
-    sema: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(MAX_CONCURRENT)
-    )
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def acquire(self) -> None:
@@ -223,10 +236,10 @@ class BudgetCounter:
                     f"Refusing call #{self.used + 1}: would exceed budget of {self.max_calls}"
                 )
             self.used += 1
-        await self.sema.acquire()
+        await _global_sema().acquire()
 
     def release(self) -> None:
-        self.sema.release()
+        _global_sema().release()
 
 
 # ---------------------------------------------------------------- gemini IO
