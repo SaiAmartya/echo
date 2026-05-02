@@ -60,6 +60,20 @@ If you see uncommitted files in `api/` and you're the frontend-engineer, leave t
 
 If you discover a refactor opportunity outside your task, write it to `docs/BACKLOG.md` (create if absent) and keep moving. Don't pull yarn threads mid-build during a hackathon.
 
+## R10 — For browser-driven tests, spawn `general-purpose`, NOT `e2e-test-runner`
+
+The `e2e-test-runner` subagent template in this environment is configured for a different project (TidalTasks Vitest/Playwright/Maestro) and does **not** include `mcp__claude-in-chrome__*`, `SendMessage`, or `TaskList`/`TaskUpdate`. Spawning it for echo blocks the agent immediately.
+
+**For ANY browser automation task on echo (recording GIFs, driving the golden path, console / network audits), use:**
+
+```
+subagent_type: "general-purpose"
+```
+
+…which has all tools (`*`) including chrome MCP and the team-coordination toolset.
+
+The agent should still call `ToolSearch` with `select:mcp__claude-in-chrome__<tool_name>` to load the chrome tool schemas before first use (they're deferred by default).
+
 ## R9 — Human QA gate at every phase boundary (NON-NEGOTIABLE)
 
 After **every** phase completes (A, B, C, D, E, and any future phase), the team-lead **MUST**:
