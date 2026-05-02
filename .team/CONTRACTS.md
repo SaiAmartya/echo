@@ -624,3 +624,42 @@ This guarantees **replay parity**: the v7 round-event JSON contains the full LLM
 ---
 
 **v7 LOCKED — 2026-05-02.** Implementations land in Phases Z1 (persona genesis + persistence), Z2 (engine rewrite), Z3 (FE surfacing). Engine flag enables instant rollback.
+
+
+---
+
+## v8 (LOCKED — 2026-05-02): web-grounding loading-state events
+
+User reported the silent ~22s delay between sim start and round 1 (when `web_grounding=true`) felt like a hang. This adds dedicated SSE event types so the FE can surface a "searching the web…" banner while the grounding pre-call runs.
+
+### § 31. SSE `event: grounding` (NEW, additive)
+
+Emitted ONLY when `web_grounding=true` on `/simulate/start`. Fires from `run_simulation` BEFORE any `event: round`. Multiple events allowed per sim (typically `searching` then either `done`, `skipped`, or `failed`).
+
+```ts
+// data shapes by status
+{ "status": "searching" }
+{ "status": "done", "chars_added": number }
+{ "status": "skipped", "reason": string }   // empty context returned (LLM returned "NONE" or no relevant facts)
+{ "status": "failed", "reason": string }    // grounding pre-call raised; swallowed; sim still proceeds ungrounded
+```
+
+### § 32. Sequence guarantees
+
+- If `web_grounding=true` → exactly ONE `searching` event is emitted, followed by exactly ONE of `{done, skipped, failed}`. Then `event: round` events stream as normal.
+- If `web_grounding=false` (or absent / null) → NO `grounding` events. Existing v6/v7 stream shape unchanged.
+- `BudgetExceededError` from the grounding pre-call still propagates as `event: error` with code `budget_exceeded` (the BudgetCounter raised — same handling as today).
+
+### § 33. Replay parity
+
+Grounding events are NOT persisted in `round_events.payload` (those rows store per-round cumulative posts). On replay, the banner is naturally absent. v8 introduces no DB schema changes.
+
+### § 34. Backward compat
+
+- Old FE that doesn't listen for `event: grounding` silently ignores it — sse-starlette / EventSource skips events the client hasn't bound a handler for.
+- New FE listens for the event but tolerates its absence (web_grounding off, or older sims).
+- Wire shape v1-v7 preserved.
+
+---
+
+**v8 LOCKED — 2026-05-02.** Implementation: backend yields the new event from `run_simulation`'s grounding pre-call branch; frontend renders a transient banner in `/simulating`. Lead writes the contract before parallel BE+FE spawn.
