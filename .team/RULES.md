@@ -59,3 +59,19 @@ If you see uncommitted files in `api/` and you're the frontend-engineer, leave t
 ## R8 — Stay scoped
 
 If you discover a refactor opportunity outside your task, write it to `docs/BACKLOG.md` (create if absent) and keep moving. Don't pull yarn threads mid-build during a hackathon.
+
+## R9 — Human QA gate at every phase boundary (NON-NEGOTIABLE)
+
+After **every** phase completes (A, B, C, D, E, and any future phase), the team-lead **MUST**:
+
+1. Confirm the e2e-tester (or appropriate verifier) has returned a PASS.
+2. **Pause all further phase work.** Do NOT spawn the next phase's agents.
+3. Hand the human a concrete, copy-pasteable QA script: the URLs to open, the exact buttons to click, and the expected visible result.
+4. Keep the dev servers running for the human to test against.
+5. Wait for the human's explicit "QA pass — proceed" before moving on. A missing reply is NOT a pass — it's a hold.
+
+If the human reports any issue during QA, treat that as a Phase failure: spawn debugger or re-engage the relevant engineer with a focused fix list. Do not silently move forward.
+
+This rule applies retroactively to **the current Phase D** and to all future phases (E and beyond).
+
+**Why:** the e2e-tester catches functional regressions; the human catches product/UX/judgment regressions an automated test can't see. Both gates required.
