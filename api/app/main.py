@@ -369,7 +369,8 @@ async def simulate_stream(
     # works without a real row in the audiences table. Business-mode lookups
     # use get_audience_unscoped because we already verified ownership of the
     # parent simulation via get_simulation(simulation_id, uid) above.
-    sim_mode = sim.get("mode") if sim.get("mode") in ("business", "hypothetical") else "business"
+    _raw_mode = sim.get("mode")
+    sim_mode: str = _raw_mode if _raw_mode in ("business", "hypothetical") else "business"
     if sim_mode == "hypothetical":
         audience = GENERAL_PUBLIC_AUDIENCE
     else:

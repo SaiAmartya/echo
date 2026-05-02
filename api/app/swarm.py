@@ -2003,7 +2003,7 @@ async def run_simulation(
             for arc, res in zip(ARCHETYPES, results):
                 if isinstance(res, BudgetExceededError):
                     raise res
-                if isinstance(res, Exception):
+                if isinstance(res, BaseException):
                     log.warning("archetype %s failed: %r", arc, res)
                     continue
                 new_posts = _assign_personas(
@@ -2130,7 +2130,7 @@ async def run_simulation(
                 pid = persona["persona_id"]
                 if isinstance(res, BudgetExceededError):
                     raise res
-                if isinstance(res, Exception):
+                if isinstance(res, BaseException):
                     log.warning("v7 persona %s call failed: %r", pid, res)
                     persona_actions.append(
                         PersonaAction(
@@ -2479,9 +2479,12 @@ def _parse_analysis(raw: str, draft: str) -> dict[str, Any]:
         for i, item in enumerate(wr_raw[:3]):
             if not isinstance(item, dict):
                 continue
-            label = item.get("label") if isinstance(item.get("label"), str) else fallback_labels[i % 3]
-            color = item.get("color") if isinstance(item.get("color"), str) else fallback_colors[i % 3]
-            tl = item.get("tldr") if isinstance(item.get("tldr"), str) else "See replies."
+            label_raw = item.get("label")
+            color_raw = item.get("color")
+            tldr_raw = item.get("tldr")
+            label = label_raw if isinstance(label_raw, str) else fallback_labels[i % 3]
+            color = color_raw if isinstance(color_raw, str) else fallback_colors[i % 3]
+            tl = tldr_raw if isinstance(tldr_raw, str) else "See replies."
             if len(label) > 25:
                 label = label[:25]
             worth.append({"label": label, "color": color, "tldr": tl})
@@ -2662,11 +2665,12 @@ def _parse_report(raw: str, draft: str) -> dict[str, Any]:
         for item in raw_risks[:4]:
             if not isinstance(item, dict):
                 continue
-            label = item.get("label") if isinstance(item.get("label"), str) else "Risk"
-            severity = item.get("severity") if item.get("severity") in (
-                "low", "medium", "high"
-            ) else "medium"
-            detail = item.get("detail") if isinstance(item.get("detail"), str) else ""
+            label_raw = item.get("label")
+            severity_raw = item.get("severity")
+            detail_raw = item.get("detail")
+            label = label_raw if isinstance(label_raw, str) else "Risk"
+            severity = severity_raw if severity_raw in ("low", "medium", "high") else "medium"
+            detail = detail_raw if isinstance(detail_raw, str) else ""
             risks.append({"label": label[:30], "severity": severity, "detail": detail})
     if len(risks) < 2:
         # §12 minimum: 2 items. Pad with a generic placeholder.
@@ -2684,9 +2688,12 @@ def _parse_report(raw: str, draft: str) -> dict[str, Any]:
         for item in raw_rewrites[:3]:
             if not isinstance(item, dict):
                 continue
-            label = item.get("label") if isinstance(item.get("label"), str) else "Rewrite"
-            text_v = item.get("text") if isinstance(item.get("text"), str) else ""
-            rationale = item.get("rationale") if isinstance(item.get("rationale"), str) else ""
+            label_raw = item.get("label")
+            text_raw = item.get("text")
+            rationale_raw = item.get("rationale")
+            label = label_raw if isinstance(label_raw, str) else "Rewrite"
+            text_v = text_raw if isinstance(text_raw, str) else ""
+            rationale = rationale_raw if isinstance(rationale_raw, str) else ""
             rewrites.append({"label": label[:30], "text": text_v[:500], "rationale": rationale})
     if len(rewrites) < 2:
         while len(rewrites) < 2:

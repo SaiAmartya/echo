@@ -126,7 +126,7 @@ def _allocate_archetype_counts(
     # Guarantee every archetype has at least 1 (steal from the largest bucket).
     for arc in _ARCHETYPES:
         if counts.get(arc, 0) == 0:
-            donor = max(counts, key=counts.get)
+            donor = max(counts, key=lambda k: counts[k])
             if counts[donor] > 1:
                 counts[donor] -= 1
                 counts[arc] = 1
