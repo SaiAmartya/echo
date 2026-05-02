@@ -122,6 +122,56 @@ export interface ReplayResponse {
   created_at: string;
 }
 
+// v3 §12 — POST /report
+export type ReportTone = "positive" | "caution" | "danger" | "neutral";
+export type ReportVerdict = "ship" | "revise" | "rethink";
+export type ReportSeverity = "low" | "medium" | "high";
+
+export interface ReportArchetypeReception {
+  archetype: Archetype;
+  tone: ReportTone;
+  summary: string;
+  representative_quote: string;
+}
+
+export interface ReportRiskVector {
+  label: string;
+  severity: ReportSeverity;
+  detail: string;
+}
+
+export interface ReportRewriteOption {
+  label: string;
+  text: string;
+  rationale: string;
+}
+
+export interface Report {
+  executive_summary: string;
+  verdict: ReportVerdict;
+  verdict_rationale: string;
+  audience_reception: ReportArchetypeReception[];
+  risk_vectors: ReportRiskVector[];
+  rewrite_options: ReportRewriteOption[];
+  comparable_discourse: string;
+}
+
+export interface ReportResponse {
+  simulation_id: string;
+  draft: string;
+  audience_label: string;
+  rounds: number;
+  post_count: number;
+  generated_at: string;
+  model: string;
+  report: Report;
+}
+
+export interface GenerateReportRequest {
+  simulation_id: string;
+  regenerate?: boolean;
+}
+
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
@@ -156,6 +206,7 @@ async function parseError(res: Response): Promise<ApiError> {
     else if (res.status === 401) code = "oauth_failed";
     else if (res.status === 404) code = "not_found";
     else if (res.status === 409) code = "analysis_pending";
+    else if (res.status === 502) code = "gemini_unavailable";
   }
   return new ApiError({ code, message, status: res.status });
 }
@@ -208,6 +259,14 @@ export function getReplay(simulationId: string): Promise<ReplayResponse> {
   );
 }
 
+export function generateReport(
+  req: GenerateReportRequest,
+): Promise<ReportResponse> {
+  const params = new URLSearchParams({ simulation_id: req.simulation_id });
+  if (req.regenerate) params.set("regenerate", "true");
+  return postJson<ReportResponse>(`/api/report?${params.toString()}`, {});
+}
+
 export const api = {
   seed,
   simulateStart,
@@ -215,4 +274,5 @@ export const api = {
   analyze,
   getHistory,
   getReplay,
+  generateReport,
 };

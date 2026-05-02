@@ -15,7 +15,7 @@ export function Composer({
   disabled?: boolean;
 }) {
   const len = draft.length;
-  const tooLong = len > 280;
+  const tooLong = len > 3500;
   return (
     <div
       style={{
@@ -81,7 +81,7 @@ export function Composer({
             marginLeft: "auto",
           }}
         >
-          {len} / 280
+          {len} / 3500
         </span>
         <Button variant="secondary">Save draft</Button>
         <Button

@@ -242,7 +242,17 @@ function ResultsInner() {
           <Button variant="secondary" onClick={() => router.push("/compose")}>
             Edit draft
           </Button>
-          <Button variant="primary">Publish</Button>
+          <Button
+            variant="primary"
+            icon={<Icon name="zap" size={13} />}
+            onClick={() =>
+              analysis &&
+              router.push(`/report?id=${encodeURIComponent(analysis.simulation_id)}`)
+            }
+            disabled={!analysis}
+          >
+            See full report
+          </Button>
         </div>
       </div>
     </Frame>
