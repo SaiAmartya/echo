@@ -2,7 +2,7 @@
 
 Pre-flight check for social posts: a swarm of 200 simulated personas reacts (and reacts to each other) before you publish.
 
-This repo currently contains **Step 1 (Skeleton)** of `ACTION-PLAN.md` — Next.js + Tailwind frontend, FastAPI + SQLite backend with stub endpoints, and the design ported from the `Echo Prototype.html` bundle into real React pages. All four backend endpoints (`/seed`, `/simulate/start`, `/simulate/stream`, `/analyze`) return canned data so the end-to-end happy path is verifiable on localhost. Real LLM calls land in Step 2.
+This repo currently contains **Step 1 (Skeleton)** of `ACTION-PLAN.md` — Next.js + Tailwind frontend, FastAPI + SQLite backend with stub endpoints, and the design ported from the `Echo Prototype.html` bundle into real React pages. All four backend endpoints (`/seed`, `/simulate/start`, `/simulate/stream`, `/analyze`) return canned data so the end-to-end happy path is verifiable on localhost. Real LLM calls land in Step 2
 
 ```
 echo/
