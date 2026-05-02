@@ -234,6 +234,55 @@ html, body {
   text-shadow: 0 0 6px rgba(240,108,90,0.45);
 }
 
+/* ---- Z7: Long-thread reply truncation ---------------------------------- */
+
+/* Slide-down for newly-revealed children after the user clicks Expand. The
+   wrapper applies this on top of TweetCard's own echo-card-fade-in (240ms),
+   producing a slightly punchier reveal at EXPAND_DURATION_MS (default 200ms).
+   Duration is overridable via the --echo-expand-duration custom property the
+   wrapper sets inline (so SwarmThread.tsx's module-top constant stays the
+   single source of truth). */
+@keyframes echo-expand-slide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.echo-expand-revealed {
+  animation: echo-expand-slide var(--echo-expand-duration, 200ms) var(--ease-out) both;
+}
+
+/* Subtle pill-shaped CTA matching the dashed-border / mono / fg-3 muted
+   chrome used elsewhere. Hover lifts the text + border to fg-1 / strong
+   border. Full-width inside the indented child column for an obvious tap
+   target without screaming for attention. */
+.echo-expand-button {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  margin-top: 2px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--tracking-wide);
+  text-align: center;
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background 140ms var(--ease-out);
+}
+.echo-expand-button:hover {
+  color: var(--fg-1);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+.echo-expand-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
 *::-webkit-scrollbar { width: 6px; height: 6px; }
 *::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 999px; }
 *::-webkit-scrollbar-track { background: transparent; }

@@ -14,12 +14,27 @@
 // like-count generation is gone — TweetCard now consumes wire values per
 // CONTRACTS v6 §21.
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { ServerPost, SimulationMode } from "@/lib/api";
 import { agentPoint, type Archetype } from "@/lib/swarm-graph";
 import { buildThreadGroups, type SortMode } from "@/lib/tree-builder";
 import { SwarmMap, type SwarmMapEdge } from "./SwarmMap";
 import { TweetCard } from "./TweetCard";
+
+// Z7 — Long-thread reply truncation.
+// When a top-level post accumulates a long descendant chain, render only the
+// first INITIAL_REPLY_COUNT cards (with the last one masked by a CSS bottom
+// fade) and a single "Expand N more replies" pill below. Click expands
+// one-way (no collapse-back) for hackathon scope. Per L21 these knobs are
+// module-top so subsequent agents tuning the look don't have to hunt.
+//
+// Note: count is computed against the FLATTENED descendant subtree because
+// the renderer flattens level-3+ replies to level-1 visually (see
+// tree-builder.ts §"Tree shape"). What the user perceives as "direct
+// children" is really "rendered children under the top-level".
+const INITIAL_REPLY_COUNT = 2;     // children shown before fade kicks in
+const FADE_OPACITY_START = 0.6;    // where the second card's fade-out starts (0..1)
+const EXPAND_DURATION_MS = 200;    // slide-down animation duration (ms)
 
 type AudienceKind = "target" | "public";
 
@@ -222,6 +237,24 @@ function ThreadColumn({
   const liveCutoffIdx = Math.max(0, arrivalSorted.length - LIVE_WINDOW);
   const liveSet = new Set(arrivalSorted.slice(liveCutoffIdx).map((p) => p.id));
 
+  // Z7 — per-top-level-post expansion state for the long-thread reply
+  // truncation UI. Keyed on post.id so the R2 engagement-DESC re-sort (which
+  // reorders top-level groups) doesn't scramble which threads are expanded.
+  // One-way (no collapse-back) for hackathon scope. Set is fine here — the
+  // membership check is O(1) and React's reference-equality on Set forces a
+  // re-render when we copy-and-add on click.
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
+  const expandParent = (id: string) => {
+    setExpandedParents((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  };
+
   // FLIP-based animated re-sort. We snapshot top-level group positions on
   // every layout pass; when sortMode flips we use the previous snapshot as
   // the "from" position and animate to the current ("to") via CSS transform.
@@ -370,61 +403,125 @@ function ThreadColumn({
                 now={now}
                 liveAnimations={liveSet.has(group.top.id)}
               />
-              {group.descendants.length > 0 && (
-                <div
-                  style={{
-                    position: "relative",
-                    marginLeft: 36,
-                    paddingLeft: 12,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 6,
-                  }}
-                >
-                  {/* Vertical thread-line connecting top-level avatar to children */}
-                  <span
-                    aria-hidden
+              {group.descendants.length > 0 && (() => {
+                // Z7 — truncation slicing. We compute `needsTruncation` from
+                // the FLATTENED descendant count (the visual rendered count),
+                // not from a "direct children only" count, so a long deep
+                // chain triggers the same fade as a wide flat one. Recomputed
+                // every render → live mode 4th-arrival auto-shows once the
+                // count crosses INITIAL_REPLY_COUNT + 1.
+                const isExpanded = expandedParents.has(group.top.id);
+                const total = group.descendants.length;
+                // Truncate when there is at least one card to hide beyond the
+                // INITIAL_REPLY_COUNT visible window. With the default of 2
+                // visible, this fires at total >= 3 per the spec.
+                const needsTruncation = total > INITIAL_REPLY_COUNT;
+                const visible = needsTruncation && !isExpanded
+                  ? group.descendants.slice(0, INITIAL_REPLY_COUNT)
+                  : group.descendants;
+                const hiddenCount = total - INITIAL_REPLY_COUNT;
+                const fadeMaskStyle: CSSProperties = {
+                  WebkitMaskImage: `linear-gradient(to bottom, black 0%, black ${
+                    Math.round(FADE_OPACITY_START * 100)
+                  }%, transparent 100%)`,
+                  maskImage: `linear-gradient(to bottom, black 0%, black ${
+                    Math.round(FADE_OPACITY_START * 100)
+                  }%, transparent 100%)`,
+                };
+                return (
+                  <div
                     style={{
-                      position: "absolute",
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 2,
-                      background: "var(--border)",
-                      borderRadius: 2,
+                      position: "relative",
+                      marginLeft: 36,
+                      paddingLeft: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
                     }}
-                  />
-                  {group.descendants.map((d) => {
-                    const ag = lookup(d.agent);
-                    if (!ag) return null;
-                    return (
-                      <TweetCard
-                        key={d.id}
-                        post={{
-                          id: d.id,
-                          parent: d.parent,
-                          round: d.round,
-                          text: d.text,
-                          sentiment: d.sentiment,
-                          like_count: d.like_count,
-                          reply_count: d.reply_count,
-                        }}
-                        agent={{
-                          id: ag.id,
-                          name: ag.name,
-                          handle: ag.handle,
-                          archetype: ag.archetype,
-                          bio: ag.bio,
-                          profession: ag.profession,
-                        }}
-                        parentHandle={parentHandleOf(d.parent)}
-                        now={now}
-                        liveAnimations={liveSet.has(d.id)}
-                      />
-                    );
-                  })}
-                </div>
-              )}
+                  >
+                    {/* Vertical thread-line connecting top-level avatar to children */}
+                    <span
+                      aria-hidden
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: 2,
+                        background: "var(--border)",
+                        borderRadius: 2,
+                      }}
+                    />
+                    {visible.map((d, idx) => {
+                      const ag = lookup(d.agent);
+                      if (!ag) return null;
+                      // The last visible card under truncation gets the
+                      // bottom-fade mask AND skips typing (typing on a
+                      // half-faded card looks broken — see brief).
+                      const isFadeCard =
+                        needsTruncation && !isExpanded && idx === INITIAL_REPLY_COUNT - 1;
+                      // Newly-revealed cards (post-expand-click) ride a
+                      // 200ms slide-down on top of TweetCard's own fade-in.
+                      const isNewlyRevealed = isExpanded && idx >= INITIAL_REPLY_COUNT;
+                      const card = (
+                        <TweetCard
+                          post={{
+                            id: d.id,
+                            parent: d.parent,
+                            round: d.round,
+                            text: d.text,
+                            sentiment: d.sentiment,
+                            like_count: d.like_count,
+                            reply_count: d.reply_count,
+                          }}
+                          agent={{
+                            id: ag.id,
+                            name: ag.name,
+                            handle: ag.handle,
+                            archetype: ag.archetype,
+                            bio: ag.bio,
+                            profession: ag.profession,
+                          }}
+                          parentHandle={parentHandleOf(d.parent)}
+                          now={now}
+                          liveAnimations={!isFadeCard && liveSet.has(d.id)}
+                        />
+                      );
+                      if (isFadeCard) {
+                        return (
+                          <div key={d.id} style={fadeMaskStyle}>
+                            {card}
+                          </div>
+                        );
+                      }
+                      if (isNewlyRevealed) {
+                        return (
+                          <div
+                            key={d.id}
+                            className="echo-expand-revealed"
+                            style={{
+                              ["--echo-expand-duration" as string]: `${EXPAND_DURATION_MS}ms`,
+                            } as CSSProperties}
+                          >
+                            {card}
+                          </div>
+                        );
+                      }
+                      return <div key={d.id}>{card}</div>;
+                    })}
+                    {needsTruncation && !isExpanded && (
+                      <button
+                        type="button"
+                        className="echo-expand-button"
+                        onClick={() => expandParent(group.top.id)}
+                        aria-expanded={false}
+                      >
+                        Expand {hiddenCount} more {hiddenCount === 1 ? "reply" : "replies"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           );
         })}
