@@ -403,38 +403,53 @@ VOICE_CADENCES: tuple[str, ...] = (
 _VOICE_CADENCE_GUIDE: dict[str, str] = {
     "direct": (
         "You open with the take itself, declarative, no setup. First words ARE the take. "
-        "Examples: 'this is the lazy version of accessibility…' / "
-        "'four-day weeks help adults more than kids.'"
+        "Pattern (off-canon examples — DO NOT copy these phrases verbatim, "
+        "internalize the SHAPE and apply it to whatever you're actually reacting to): "
+        "'the salt is doing all the work in this recipe.' / "
+        "'this album genuinely changed how i think about jazz.' / "
+        "'the timeline on this proposal is fine, the budget isn't.'"
     ),
     "interrogative": (
         "You open with a question — pointed, real, not rhetorical fluff. The question IS your reaction. "
-        "Examples: 'why are we letting this normalize before the data lands?' / "
-        "'who actually benefits from this and who absorbs the cost?'"
+        "Pattern (off-canon — internalize, don't copy): "
+        "'is the supplier audited or are we trusting the spec sheet?' / "
+        "'who's testing this with screen-readers before launch?' / "
+        "'has anyone actually tried this longer than a week?'"
     ),
     "clipped": (
         "You open with a fragment, one word, or a sentence that trails. Terse. Reads like a side-comment. "
-        "Examples: 'nope.' / 'yeah no.' / 'sure, fine.' / 'every time.'"
+        "Tone is open — clipped can be approving, dismissive, or neutral. "
+        "Examples: 'nope.' / 'yes, finally.' / 'fine.' / 'classic.' / 'good.' / 'every time.' / 'eh.'"
     ),
     "narrative": (
         "You open with a small piece of personal context or anecdote BEFORE the take. "
-        "Lived-experience first, conclusion second. "
-        "Examples: 'my cousin teaches 6th grade — last district that tried this rolled it back in two years.' / "
-        "'tried something like this on my team last quarter, here's what actually happened…'"
+        "Lived-experience first, conclusion second. The anecdote can support OR undercut the take. "
+        "Pattern (off-canon — internalize, don't copy): "
+        "'spent three years at a hospital that did this — total game-changer.' / "
+        "'last team i worked with rolled this out and quietly rolled it back six months later.' / "
+        "'tried this exact thing in my hometown, half the businesses loved it.'"
     ),
     "wry": (
-        "You open with sarcastic understatement or dry irony. The literal words sound mild; the meaning bites. "
-        "Examples: 'ah yes, the future of education.' / "
-        "'cool cool cool, nothing to see here.' / 'sure, this will go great.'"
+        "You open with sarcastic understatement OR dry approval — irony cuts both ways. "
+        "The literal words are mild; the meaning sharpens what follows. Wry is NOT just negative. "
+        "Pattern (off-canon — internalize, don't copy): "
+        "'oh good, more committees.' / 'truly the heroes we deserved.' / "
+        "'ground-breaking. revolutionary. unprecedented.' / 'no notes.'"
     ),
     "analytical": (
-        "You open by naming the FRAME or the second-order effect — what's actually at issue, not the surface. "
-        "Examples: 'the issue here isn't the headband, it's the data pipeline behind it.' / "
-        "'this trades teacher hours for parent childcare costs — same problem, different ledger.'"
+        "You open by naming the FRAME or the second-order effect — what's actually at issue. "
+        "Tone is neutral — the analysis can land positive or negative. "
+        "Pattern (off-canon — internalize, don't copy): "
+        "'this redistributes risk from the platform to the user — and that's actually fine here.' / "
+        "'the bottleneck moves upstream, which is the whole point.' / "
+        "'second-order effect: the people opting out are the ones we most needed feedback from.'"
     ),
     "emotional": (
-        "You open with the FELT reaction — a feeling word or visceral state, no emoji. "
-        "Examples: 'genuinely tired of this conversation.' / "
-        "'this scares me in a way i can't articulate yet.' / 'so excited honestly.'"
+        "You open with the FELT reaction — a feeling word or visceral state. No emoji. "
+        "Feelings span the full range: relief, joy, dread, pride, exhaustion, hope, anger. "
+        "Pattern (off-canon — internalize, don't copy): "
+        "'genuinely happy this exists.' / 'i'm relieved someone said it.' / "
+        "'this makes me hopeful for the first time in months.' / 'exhausted just reading it.'"
     ),
 }
 
