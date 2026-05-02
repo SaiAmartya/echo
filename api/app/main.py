@@ -34,6 +34,7 @@ from .db import (  # noqa: E402
     get_analysis,
     get_audience,
     get_audience_unscoped,
+    get_personas,
     get_report,
     get_simulation,
     get_simulation_full,
@@ -186,6 +187,12 @@ class ReplayAgent(BaseModel):
     handle: str
     archetype: Literal["skeptic", "enthusiast", "curious", "practitioner", "pedant", "lurker"]
     audience: Literal["target", "public"]
+    # Z2 / v7 (CONTRACTS §25): rich persona fields surfaced on the wire for
+    # v7 sims; empty/null for v6 sims and pre-Z1 replays. Old FE silently
+    # ignores; new FE surfaces via tooltip / panel.
+    bio: str = ""
+    profession: str | None = None
+    hot_buttons: list[str] | None = None
 
 
 class ReplayPost(BaseModel):
@@ -601,14 +608,17 @@ def simulate_replay(
         mode_raw = full.get("mode")
         mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
 
-        # v6 (CONTRACTS §24): re-derive engagement on the fly so pre-v6
-        # sims (whose stored round_events JSON has no like_count/reply_count)
-        # still surface engagement at replay time. Algorithm is deterministic
-        # by (sim_id, post_id, round) — same sim → same like_counts on every
-        # replay (L22). For sims that already wrote engagement into the JSON,
-        # this just recomputes the same values.
+        # Z2 / v7 (CONTRACTS §29): replay routes on whether the persisted
+        # round_events JSON carries `persona_actions` (v7 — LLM-emergent
+        # likes already in posts; just render) vs. v6 (deterministic
+        # re-derivation via attach_engagement). The cheapest, most robust
+        # signal is the `personas` table: non-empty rows for the sim →
+        # genesis ran → this is a v7 sim. v6 sims never write to personas.
         posts_raw: list[dict[str, Any]] = list(full.get("posts") or [])
-        if posts_raw:
+        is_v7_sim = bool(get_personas(full["simulation_id"]))
+        if posts_raw and not is_v7_sim:
+            # v6 deterministic re-derivation. Same (sim_id, post_id, round)
+            # → same like_counts on every replay (L22).
             final_round = max(int(p.get("round", 0) or 0) for p in posts_raw)
             # Ownership already verified by get_simulation_full(sim_id, uid)
             # above; the unscoped lookups here are safe and avoid a redundant
@@ -628,6 +638,9 @@ def simulate_replay(
                 current_round=final_round,
                 audience=replay_audience,
             )
+        # v7 path: posts already carry like_count + reply_count from the
+        # persisted round_event JSON (engine wrote them at SSE emit time).
+        # Replay reads bytes-for-bytes from disk — Gate 6 replay parity.
 
         return ReplayResponse(
             simulation_id=full["simulation_id"],
