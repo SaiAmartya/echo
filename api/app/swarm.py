@@ -19,8 +19,10 @@ HARD CONSTRAINTS (per docs/SWARM-DESIGN.md + .team/CONTRACTS.md):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -71,6 +73,192 @@ ARCHETYPES: tuple[str, ...] = (
     "pedant",
     "lurker",
 )
+
+
+# ----------------------------------------------------- v6 engagement engine
+# v6 (CONTRACTS §§21-24, 2026-05-02): real engagement signal on posts.
+# Likes are computed deterministically (NO new LLM calls) so the per-sim
+# budget stays at ≤100. Same (sim_id, post_id, round) tuple → same
+# like_count, every replay (L22 — deterministic PRNG seeded by stable id
+# preserves replay parity).
+#
+# Affinity matrix — rows = scroller archetype (the persona deciding whether
+# to like), cols = post author archetype. Values 0..1 are "tendency to like
+# a post by that archetype". Calibrated for social-media plausibility:
+#   - enthusiasts are the like-button users — they boost everyone, esp. own.
+#   - skeptics rarely like; when they do, it's other skeptics (validation)
+#     or pedants (precision they respect).
+#   - lurkers are mostly receptive; mild boost on enthusiast vibes (energy).
+#   - pedants almost never like — they correct, not validate.
+#   - practitioners reward other practitioners (peer recognition) and
+#     pedants (precision).
+#   - curious is moderate across the board (scrolling-engaged but not fan).
+_ARCHETYPE_AFFINITY: dict[str, dict[str, float]] = {
+    "skeptic":      {"skeptic": 0.45, "enthusiast": 0.15, "curious": 0.25, "practitioner": 0.30, "pedant": 0.40, "lurker": 0.20},
+    "enthusiast":   {"skeptic": 0.20, "enthusiast": 0.60, "curious": 0.40, "practitioner": 0.35, "pedant": 0.15, "lurker": 0.50},
+    "curious":      {"skeptic": 0.30, "enthusiast": 0.40, "curious": 0.40, "practitioner": 0.40, "pedant": 0.30, "lurker": 0.30},
+    "practitioner": {"skeptic": 0.25, "enthusiast": 0.30, "curious": 0.30, "practitioner": 0.55, "pedant": 0.40, "lurker": 0.25},
+    "pedant":       {"skeptic": 0.15, "enthusiast": 0.10, "curious": 0.15, "practitioner": 0.20, "pedant": 0.20, "lurker": 0.10},
+    "lurker":       {"skeptic": 0.35, "enthusiast": 0.50, "curious": 0.40, "practitioner": 0.40, "pedant": 0.35, "lurker": 0.35},
+}
+
+
+def _stable_seed(*parts: str) -> int:
+    """Deterministic 32-bit seed from string parts.
+
+    Uses hashlib.md5 (process-stable) instead of Python's hash() because
+    hash() is PYTHONHASHSEED-salted by default in CPython 3.x — replays
+    across process restarts would diverge. md5 is sufficient for jitter
+    seeding (we are not using it as a security primitive).
+    """
+    digest = hashlib.md5(":".join(parts).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _visibility_factor(current_round: int, post_round: int) -> float:
+    """Recency decay — post seen most when fresh, less in later rounds."""
+    delta = current_round - post_round
+    if delta <= 0:
+        return 1.0
+    if delta == 1:
+        return 0.5
+    if delta == 2:
+        return 0.25
+    return 0.10
+
+
+def _sentiment_resonance(sentiment: float) -> float:
+    """Bell curve peaked at |s|=0.7. Tepid (~0) and bot-extreme (~1) both damp.
+
+    resonance(0.0) ≈ 0.46, resonance(0.7) = 1.0, resonance(1.0) ≈ 0.85.
+    Real social-media engagement skews to opinionated takes — but the
+    most-extreme posts read as bot-like and underperform genuine heat.
+    """
+    s = max(0.0, min(1.0, abs(sentiment)))
+    sigma = 0.35
+    return 0.4 + 0.6 * math.exp(-((s - 0.7) ** 2) / (2 * sigma ** 2))
+
+
+def _text_quality(text: str) -> float:
+    """Word-count quality proxy — peak 8-25 words, damp short and long.
+
+    Tweet-shaped takes (one or two punchy sentences) drive most engagement.
+    Single-word takes feel low-effort; over-long takes get scrolled past.
+    """
+    n = len((text or "").split())
+    if n == 0:
+        return 0.3
+    if n < 5:
+        return 0.4 + 0.05 * n  # 0.4..0.6 over 0..4
+    if n <= 15:
+        return 0.7 + 0.3 * (n - 5) / 10  # ramp 0.7..1.0
+    if n <= 25:
+        return 1.0
+    if n <= 40:
+        return 1.0 - 0.3 * (n - 25) / 15  # 1.0 → 0.7
+    return max(0.4, 0.7 - 0.2 * (n - 40) / 20)  # 0.7 → ~0.5
+
+
+def _per_round_likes(
+    *,
+    sim_id: str,
+    post: dict[str, Any],
+    current_round: int,
+    audience: dict[str, Any],
+) -> int:
+    """Likes accrued by `post` IN `current_round` only. Deterministic.
+
+    Same (sim_id, post_id, round) → same value. The per-round delta is
+    always ≥0, so the cumulative sum is monotonically non-decreasing
+    (CONTRACTS §22). Pre-publish rounds return 0.
+    """
+    post_round = int(post.get("round", current_round))
+    if current_round < post_round:
+        return 0
+
+    seed = _stable_seed(sim_id, str(post.get("id") or ""), str(current_round))
+    rng = random.Random(seed)
+
+    arc_list = audience.get("archetypes") or []
+    eligible = int(audience.get("size") or 200)
+    visibility = _visibility_factor(current_round, post_round)
+
+    post_arc = (post.get("agent") or {}).get("archetype", "curious")
+    weighted_affinity = 0.0
+    total_share = 0.0
+    for arc in arc_list:
+        arc_id = arc.get("id") or ""
+        share = float(arc.get("share") or 0)
+        if share > 1.0:  # FE/seed serializes shares as percent (0-100); normalize.
+            share /= 100.0
+        affinity = _ARCHETYPE_AFFINITY.get(arc_id, {}).get(post_arc, 0.25)
+        weighted_affinity += share * affinity
+        total_share += share
+    if total_share <= 0:
+        weighted_affinity = 0.30  # fallback when audience archetypes missing.
+
+    sent = float(post.get("sentiment", 0.0))
+    resonance = _sentiment_resonance(sent)
+    quality = _text_quality(post.get("text", "") or "")
+
+    base_rate = 0.04  # 4% of eligible-and-affine personas like in a given round.
+    expected = (
+        eligible * visibility * weighted_affinity * resonance * quality * base_rate
+    )
+    jitter = rng.uniform(0.7, 1.3)
+    final = round(expected * jitter)
+    return max(0, min(80, int(final)))
+
+
+def _compute_like_count(
+    *,
+    sim_id: str,
+    post: dict[str, Any],
+    current_round: int,
+    audience: dict[str, Any],
+) -> int:
+    """Cumulative like_count for `post` as of `current_round`.
+
+    Sum of per-round likes from the post's emit round through current_round.
+    Each per-round contribution is ≥0, so the cumulative value is monotonic
+    non-decreasing across rounds (CONTRACTS §22). Soft-capped at 80×rounds
+    via the inner clamp.
+    """
+    post_round = int(post.get("round", current_round))
+    if current_round < post_round:
+        return 0
+    total = 0
+    for r in range(post_round, current_round + 1):
+        total += _per_round_likes(
+            sim_id=sim_id, post=post, current_round=r, audience=audience
+        )
+    return total
+
+
+def _compute_reply_count(post: dict[str, Any], all_posts: list[dict[str, Any]]) -> int:
+    """Trivial — count children of `post` in cumulative posts."""
+    pid = post.get("id")
+    return sum(1 for p in all_posts if p.get("parent") == pid)
+
+
+def attach_engagement(
+    posts: list[dict[str, Any]],
+    *,
+    sim_id: str,
+    current_round: int,
+    audience: dict[str, Any],
+) -> None:
+    """Mutate `posts` in place — set `like_count` + `reply_count` on each.
+
+    Public symbol so main.py can re-derive engagement at replay time
+    (CONTRACTS §24 — pre-v6 sims get engagement signal at replay for free,
+    deterministic per sim_id).
+    """
+    for p in posts:
+        p["like_count"] = _compute_like_count(
+            sim_id=sim_id, post=p, current_round=current_round, audience=audience
+        )
+        p["reply_count"] = _compute_reply_count(p, posts)
 
 
 # ---------------------------------------------------------- archetype voices
@@ -232,13 +420,21 @@ def _build_user_prompt(
     if round_n == 1 or not prior_top:
         prior_block = "This is the first round. React directly to the input above."
     else:
+        # v6 (CONTRACTS §23): show engagement metrics inline so the model can
+        # do the "scroll then engage" thing — pick the trending take to dunk
+        # on, or the under-engaged sleeper to amplify.
         lines = [
-            f'- id={p["id"]} by {p["agent"]["archetype"]}: "{p["text"]}"'
+            (
+                f'- id={p["id"]} by {p["agent"]["archetype"]} '
+                f'[likes={int(p.get("like_count", 0))}, '
+                f'replies={int(p.get("reply_count", 0))}]: "{p["text"]}"'
+            )
             for p in prior_top
         ]
         prior_block = (
-            "Previous rounds have produced replies. The loudest 5 (most "
-            "replied-to or highest-engagement) so far:\n\n"
+            "Previous rounds have produced replies. What's gaining traction "
+            "(top by likes+replies) plus a couple under-engaged takes for "
+            "discovery:\n\n"
             + "\n".join(lines)
             + "\n\nYou may reply to one of those (use its id as `replying_to`) OR "
             "react directly to the input (use null for `replying_to`). You DO NOT "
@@ -673,25 +869,52 @@ def _audience_blurb(audience: dict[str, Any]) -> str:
     return f"{name} ({size:,}) — {parts}" if parts else f"{name} ({size:,})"
 
 
-def _engagement(post: dict[str, Any], reply_count: dict[str, int]) -> int:
-    """Cheap proxy: replies received + sentiment magnitude bonus."""
-    return reply_count.get(post["id"], 0) * 3 + int(abs(post["sentiment"]) * 4)
+def _engagement_score(post: dict[str, Any]) -> int:
+    """v6 (CONTRACTS §23): engagement_score = like_count + reply_count*2.
+
+    Falls back to 0 for posts that haven't had engagement attached yet
+    (round 1 prior_top, fresh cumulative before attach_engagement runs).
+    """
+    return int(post.get("like_count", 0)) + 2 * int(post.get("reply_count", 0))
 
 
-def _top_engaged(posts: list[dict[str, Any]], k: int = 5) -> list[dict[str, Any]]:
+def _top_engaged(
+    posts: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+    k: int = 5,
+) -> list[dict[str, Any]]:
+    """v6 (CONTRACTS §23): "scroll then engage" prior-top selection.
+
+    Returns top 4 posts by engagement_score (likes + replies*2) DESC, plus
+    1-2 random long-tail picks from the bottom-quartile by score for
+    discovery. Lets the model react to what's gaining traction AND
+    occasionally surface an under-engaged take, the way real users scroll.
+    Stable: if engagement_score is all zero (round 1 / pre-engagement),
+    falls back to id-order so behavior matches the v1 selection.
+    """
     if not posts:
         return []
-    reply_count: dict[str, int] = {}
-    for p in posts:
-        parent = p.get("parent")
-        if parent and parent != "seed":
-            reply_count[parent] = reply_count.get(parent, 0) + 1
     scored = sorted(
         posts,
-        key=lambda p: (_engagement(p, reply_count), -int(p["id"][1:])),
-        reverse=True,
+        key=lambda p: (-_engagement_score(p), int(p["id"][1:])),
     )
-    return scored[:k]
+    top_n = min(4, k, len(scored))
+    top = scored[:top_n]
+    top_ids = {p["id"] for p in top}
+
+    remaining = [p for p in scored if p["id"] not in top_ids]
+    long_tail: list[dict[str, Any]] = []
+    if remaining:
+        # Bottom quartile of `remaining` by score (i.e. the worst-engaged
+        # posts). For tiny corpora that's just "the rest". Pick 1-2 random.
+        bottom_q_size = max(1, len(remaining) // 4)
+        bottom_q = remaining[-bottom_q_size:]
+        slots = max(0, k - len(top))
+        n_long_tail = min(slots, 2, len(bottom_q))
+        if n_long_tail > 0:
+            long_tail = rng.sample(bottom_q, k=n_long_tail)
+    return top + long_tail
 
 
 def _validate_parent(replying_to: str | None, known_ids: set[str]) -> str:
@@ -823,7 +1046,10 @@ async def run_simulation(
 
     async def _inner() -> AsyncIterator[dict[str, Any]]:
         for round_n in range(1, rounds + 1):
-            prior_top = _top_engaged(cumulative, k=5)
+            # v6: prior_top now ranks by engagement_score (like_count +
+            # reply_count*2). Engagement was attached at the end of the
+            # previous round, so cumulative carries the latest values.
+            prior_top = _top_engaged(cumulative, rng=rng, k=5)
             results = await asyncio.gather(
                 *[
                     _call_archetype(
@@ -858,6 +1084,18 @@ async def run_simulation(
                     round_n=round_n,
                 )
                 cumulative.extend(new_posts)
+
+            # v6 (CONTRACTS §§21-22): attach deterministic like_count +
+            # reply_count to every cumulative post. Same (sim_id, post_id,
+            # round) tuple → same value, every replay (L22). Like_count is
+            # cumulative across rounds and monotonically non-decreasing —
+            # later rounds add ≥0 new likes via visibility-decayed accrual.
+            attach_engagement(
+                cumulative,
+                sim_id=sim_id,
+                current_round=round_n,
+                audience=audience,
+            )
 
             sorted_posts = _sort_posts(cumulative)
             yield {

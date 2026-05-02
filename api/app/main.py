@@ -41,6 +41,7 @@ from .swarm import (
     GENERAL_PUBLIC_AUDIENCE,
     GeminiUnavailableError,
     ReportSimNotFoundError,
+    attach_engagement,
     default_audience_archetypes,
     generate_report,
     get_report_lock,
@@ -173,6 +174,12 @@ class ReplayPost(BaseModel):
     agent: ReplayAgent
     sentiment: float
     text: str
+    # v6 (CONTRACTS §§21-22): engagement signal. Defaults to 0 for legacy
+    # rows whose stored payload predates the engagement engine. Replay
+    # handler re-derives these on-the-fly using the deterministic algorithm
+    # (same `(sim_id, post_id, round)` → same value, every time — L22).
+    like_count: int = 0
+    reply_count: int = 0
 
 
 class ReplayAnalysis(BaseModel):
@@ -529,11 +536,37 @@ def simulate_replay(
 
         mode_raw = full.get("mode")
         mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
+
+        # v6 (CONTRACTS §24): re-derive engagement on the fly so pre-v6
+        # sims (whose stored round_events JSON has no like_count/reply_count)
+        # still surface engagement at replay time. Algorithm is deterministic
+        # by (sim_id, post_id, round) — same sim → same like_counts on every
+        # replay (L22). For sims that already wrote engagement into the JSON,
+        # this just recomputes the same values.
+        posts_raw: list[dict[str, Any]] = list(full.get("posts") or [])
+        if posts_raw:
+            final_round = max(int(p.get("round", 0) or 0) for p in posts_raw)
+            sim_row = get_simulation(full["simulation_id"])
+            if mode == "hypothetical":
+                replay_audience = GENERAL_PUBLIC_AUDIENCE
+            elif sim_row and sim_row.get("audience_id"):
+                replay_audience = (
+                    get_audience(sim_row["audience_id"]) or GENERAL_PUBLIC_AUDIENCE
+                )
+            else:
+                replay_audience = GENERAL_PUBLIC_AUDIENCE
+            attach_engagement(
+                posts_raw,
+                sim_id=full["simulation_id"],
+                current_round=final_round,
+                audience=replay_audience,
+            )
+
         return ReplayResponse(
             simulation_id=full["simulation_id"],
             draft=full["draft"],
             rounds=int(full["rounds"]),
-            posts=[ReplayPost(**p) for p in full["posts"]],
+            posts=[ReplayPost(**p) for p in posts_raw],
             analysis=analysis_obj,
             created_at=full["created_at"],
             mode=mode,
