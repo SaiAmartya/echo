@@ -43,12 +43,24 @@ log = logging.getLogger("echo.swarm")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# v3 (CONTRACTS §13): final aggregate analysis + /report use the thinking model.
+# Per-archetype reactions stay on Flash-Lite (cheap + plenty good).
+# Verified `gemini-3-flash-preview` via Context7 + ai.google.dev/gemini-api/docs/gemini-3
+# (2026-05-02): single model id, thinking enabled via `thinking_config={"thinking_level":...}`.
+GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-preview")
 MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "40"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
 
 PER_CALL_TIMEOUT = 10.0
-WALLCLOCK_TIMEOUT = 90.0
+# Thinking-model calls: longer ceiling (5-20s typical, occasional 30s+ on
+# thinking_level=high). The inline analysis call (run_simulation) uses level=low
+# so it stays under WALLCLOCK_TIMEOUT; /report uses level=high (no wallclock).
+THINKING_CALL_TIMEOUT = 60.0
+# Wallclock bumped 90 → 120s to leave headroom for the thinking-model analysis
+# call after rounds complete. Per-archetype rounds still finish in ≈15s; the
+# thinking analysis adds another ≈10–20s.
+WALLCLOCK_TIMEOUT = 120.0
 
 ARCHETYPES: tuple[str, ...] = (
     "skeptic",
@@ -202,6 +214,70 @@ _ANALYSIS_SCHEMA: dict[str, Any] = {
 }
 
 
+# v3 (CONTRACTS §12): full report response schema. Locked — do not deviate.
+_REPORT_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "executive_summary": {"type": "STRING"},
+        "verdict": {"type": "STRING", "enum": ["ship", "revise", "rethink"]},
+        "verdict_rationale": {"type": "STRING"},
+        "audience_reception": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "archetype": {
+                        "type": "STRING",
+                        "enum": list(ARCHETYPES),
+                    },
+                    "tone": {
+                        "type": "STRING",
+                        "enum": ["positive", "caution", "danger", "neutral"],
+                    },
+                    "summary": {"type": "STRING"},
+                    "representative_quote": {"type": "STRING"},
+                },
+                "required": ["archetype", "tone", "summary", "representative_quote"],
+            },
+        },
+        "risk_vectors": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "label": {"type": "STRING"},
+                    "severity": {"type": "STRING", "enum": ["low", "medium", "high"]},
+                    "detail": {"type": "STRING"},
+                },
+                "required": ["label", "severity", "detail"],
+            },
+        },
+        "rewrite_options": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "label": {"type": "STRING"},
+                    "text": {"type": "STRING"},
+                    "rationale": {"type": "STRING"},
+                },
+                "required": ["label", "text", "rationale"],
+            },
+        },
+        "comparable_discourse": {"type": "STRING"},
+    },
+    "required": [
+        "executive_summary",
+        "verdict",
+        "verdict_rationale",
+        "audience_reception",
+        "risk_vectors",
+        "rewrite_options",
+        "comparable_discourse",
+    ],
+}
+
+
 # -------------------------------------------------------------- budget gate
 class BudgetExceededError(RuntimeError):
     """Raised when a Gemini call would exceed the per-sim budget."""
@@ -252,8 +328,9 @@ def _make_client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
-async def _call_gemini(
+async def _call_gemini_raw(
     *,
+    model: str,
     system: str,
     user: str,
     schema: dict[str, Any],
@@ -261,13 +338,18 @@ async def _call_gemini(
     client: Any,
     temperature: float = 0.95,
     max_tokens: int = MAX_TOKENS,
+    timeout: float = PER_CALL_TIMEOUT,
+    thinking_level: str | None = None,
+    raise_on_failure: bool = False,
 ) -> str:
-    """One Gemini call, gated by the budget counter & semaphore.
+    """Internal: one Gemini call with budget + concurrency gates.
 
-    Returns the raw text body (which the caller parses). On per-call timeout
-    or transient API error, returns "" so the parser can skip cleanly without
-    crashing the round. BudgetExceededError IS allowed to propagate — the
-    orchestrator turns it into an SSE error event.
+    Shared between Flash-Lite (`_call_gemini`) and the thinking model
+    (`_call_gemini_thinking`). Returns raw text. On transient timeout/API
+    error returns "" (so parsers can skip cleanly) UNLESS `raise_on_failure`
+    is True — in which case the exception propagates (used by /report so the
+    HTTP layer can map to 502 `gemini_unavailable`). BudgetExceededError
+    always propagates.
     """
     await budget.acquire()
     try:
@@ -279,24 +361,90 @@ async def _call_gemini(
             "response_mime_type": "application/json",
             "response_schema": schema,
         }
+        if thinking_level is not None:
+            # google-genai SDK accepts the dict form alongside types.ThinkingConfig.
+            config["thinking_config"] = {"thinking_level": thinking_level}
         try:
             resp = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=model,
                     contents=user,
                     config=config,
                 ),
-                timeout=PER_CALL_TIMEOUT,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
-            log.warning("gemini call timed out after %.1fs", PER_CALL_TIMEOUT)
+            log.warning("gemini call (%s) timed out after %.1fs", model, timeout)
+            if raise_on_failure:
+                raise
             return ""
         except Exception as exc:  # noqa: BLE001 — log & swallow per design §5
-            log.warning("gemini call failed: %r", exc)
+            log.warning("gemini call (%s) failed: %r", model, exc)
+            if raise_on_failure:
+                raise
             return ""
         return getattr(resp, "text", "") or ""
     finally:
         budget.release()
+
+
+async def _call_gemini(
+    *,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+    budget: BudgetCounter,
+    client: Any,
+    temperature: float = 0.95,
+    max_tokens: int = MAX_TOKENS,
+) -> str:
+    """One Flash-Lite Gemini call (per-archetype reactions). See `_call_gemini_raw`."""
+    return await _call_gemini_raw(
+        model=GEMINI_MODEL,
+        system=system,
+        user=user,
+        schema=schema,
+        budget=budget,
+        client=client,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=PER_CALL_TIMEOUT,
+    )
+
+
+async def _call_gemini_thinking(
+    *,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+    budget: BudgetCounter,
+    client: Any,
+    temperature: float = 0.6,
+    max_tokens: int = 4096,
+    thinking_level: str = "low",
+    timeout: float = THINKING_CALL_TIMEOUT,
+    raise_on_failure: bool = False,
+) -> str:
+    """One Gemini-3-Flash thinking call (analysis + /report).
+
+    Defaults are tuned for the inline analysis (low thinking, modest output
+    cap). /report overrides `thinking_level` upward and `max_tokens` upward
+    for the long structured report. Same BudgetCounter + global semaphore
+    as Flash-Lite.
+    """
+    return await _call_gemini_raw(
+        model=GEMINI_ANALYSIS_MODEL,
+        system=system,
+        user=user,
+        schema=schema,
+        budget=budget,
+        client=client,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        thinking_level=thinking_level,
+        raise_on_failure=raise_on_failure,
+    )
 
 
 # ---------------------------------------------------------------- parsing
@@ -723,13 +871,15 @@ async def analyze(
     """
     audience_blurb = _audience_blurb(audience)
     if posts:
+        # v3 (CONTRACTS §13): thinking model has 1M context — feed the FULL
+        # cumulative thread, no top-N truncation. Per-post text capped at 400
+        # chars by the parser already, so even a 6-archetype × 6-round sim is
+        # ≤~150 lines of ≤400 chars = well under 100KB of prompt context.
         compact_lines = []
-        for p in posts[:60]:  # cap context so we leave room for output tokens
+        for p in posts:
             arc = p["agent"]["archetype"]
             sent = p["sentiment"]
             text = p["text"].replace("\n", " ")
-            if len(text) > 100:
-                text = text[:100] + "..."
             compact_lines.append(f"{arc} {sent:+.2f}: {text}")
         replies_block = "\n".join(compact_lines)
     else:
@@ -744,8 +894,7 @@ async def analyze(
         f'DRAFT:\n"""\n{draft}\n"""\n\n'
         f"AUDIENCE: {audience_blurb}\n\n"
         f"REPLIES (archetype sent: text):\n{replies_block}\n\n"
-        "Return JSON with EXACTLY these fields. Be terse — total output must "
-        "fit in 256 tokens.\n"
+        "Return JSON with EXACTLY these fields. Be terse.\n"
         '{"tldr":"<=140 char, 1 sentence, headline takeaway. honest, specific>",\n'
         ' "suggested_rewrite":{"original":"<draft verbatim>",'
         '"rewrite":"<=180 char, 1-2 sentences addressing the loudest concern, preserves author voice"},\n'
@@ -755,13 +904,17 @@ async def analyze(
         " ]}"
     )
 
-    raw = await _call_gemini(
+    # v3: switched from Flash-Lite to Gemini-3-Flash thinking. Counter still
+    # consumes 1 from the per-sim budget — call accounting unchanged.
+    raw = await _call_gemini_thinking(
         system=system,
         user=user,
         schema=_ANALYSIS_SCHEMA,
         budget=budget,
         client=client,
-        temperature=0.7,
+        temperature=0.6,
+        max_tokens=1024,       # generous headroom — thinking can be verbose
+        thinking_level="low",  # keep latency < ~25s so wallclock holds
     )
 
     parsed = _parse_analysis(raw, draft)
@@ -938,3 +1091,316 @@ def default_audience_archetypes() -> list[dict[str, Any]]:
         {"id": k, "name": display_names[k], "share": floors[k]}
         for k in ARCHETYPES
     ]
+
+
+# --------------------------------------------------------------- v3 /report
+class GeminiUnavailableError(RuntimeError):
+    """Raised when the thinking-model call fails (timeout/5xx/auth) after retry.
+
+    /report's HTTP layer maps this to 502 + code=`gemini_unavailable`.
+    """
+
+
+class ReportSimNotFoundError(LookupError):
+    """Raised when generate_report is asked for an unknown sim_id."""
+
+
+def _parse_report(raw: str, draft: str) -> dict[str, Any]:
+    """Best-effort parse of the §12 report shape.
+
+    Mirrors `_parse_analysis` strategy: strict json.loads → outermost {...} →
+    truncation-repair → fallback. Always returns a dict that conforms to the
+    required §12 keys; missing fields get reasonable scaffolding.
+    """
+    fallback_audience = [
+        {
+            "archetype": arc,
+            "tone": "neutral",
+            "summary": "No reaction generated.",
+            "representative_quote": "",
+        }
+        for arc in ARCHETYPES
+    ]
+    fallback: dict[str, Any] = {
+        "executive_summary": "Report generation failed; see thread for raw signal.",
+        "verdict": "revise",
+        "verdict_rationale": "Insufficient model output to commit to a verdict.",
+        "audience_reception": fallback_audience,
+        "risk_vectors": [
+            {"label": "Model output failure", "severity": "medium",
+             "detail": "The thinking model returned no parseable content; rerun /report?regenerate=1."},
+        ],
+        "rewrite_options": [
+            {"label": "Original", "text": draft, "rationale": "No alternatives generated."},
+        ],
+        "comparable_discourse": "",
+    }
+
+    if not raw or not raw.strip():
+        return fallback
+    txt = raw.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S).strip()
+
+    obj: Any = None
+    try:
+        obj = json.loads(txt)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", txt, flags=re.S)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                obj = _repair_truncated_json(txt)
+        else:
+            obj = _repair_truncated_json(txt)
+    if not isinstance(obj, dict):
+        return fallback
+
+    # Defensive normalisation — ensure required keys exist + types are right.
+    out: dict[str, Any] = {}
+    out["executive_summary"] = obj.get("executive_summary") if isinstance(
+        obj.get("executive_summary"), str
+    ) else fallback["executive_summary"]
+    verdict_raw = obj.get("verdict")
+    out["verdict"] = verdict_raw if verdict_raw in ("ship", "revise", "rethink") else "revise"
+    out["verdict_rationale"] = obj.get("verdict_rationale") if isinstance(
+        obj.get("verdict_rationale"), str
+    ) else fallback["verdict_rationale"]
+
+    audience: list[dict[str, Any]] = []
+    by_arc: dict[str, dict[str, Any]] = {}
+    raw_audience = obj.get("audience_reception")
+    if isinstance(raw_audience, list):
+        for item in raw_audience:
+            if not isinstance(item, dict):
+                continue
+            arc = item.get("archetype")
+            if arc not in ARCHETYPES:
+                continue
+            by_arc[arc] = {
+                "archetype": arc,
+                "tone": item.get("tone") if item.get("tone") in (
+                    "positive", "caution", "danger", "neutral"
+                ) else "neutral",
+                "summary": item.get("summary") if isinstance(item.get("summary"), str) else "",
+                "representative_quote": (item.get("representative_quote") or "")[:200]
+                if isinstance(item.get("representative_quote"), str) else "",
+            }
+    # Force exactly 6 entries, one per archetype, in canonical order.
+    for arc in ARCHETYPES:
+        audience.append(by_arc.get(arc, {
+            "archetype": arc,
+            "tone": "neutral",
+            "summary": "No reaction generated for this archetype.",
+            "representative_quote": "",
+        }))
+    out["audience_reception"] = audience
+
+    risks: list[dict[str, Any]] = []
+    raw_risks = obj.get("risk_vectors")
+    if isinstance(raw_risks, list):
+        for item in raw_risks[:4]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") if isinstance(item.get("label"), str) else "Risk"
+            severity = item.get("severity") if item.get("severity") in (
+                "low", "medium", "high"
+            ) else "medium"
+            detail = item.get("detail") if isinstance(item.get("detail"), str) else ""
+            risks.append({"label": label[:30], "severity": severity, "detail": detail})
+    if len(risks) < 2:
+        # §12 minimum: 2 items. Pad with a generic placeholder.
+        while len(risks) < 2:
+            risks.append({
+                "label": "Insufficient signal",
+                "severity": "low",
+                "detail": "Model declined to enumerate enough risks; review thread directly.",
+            })
+    out["risk_vectors"] = risks
+
+    rewrites: list[dict[str, Any]] = []
+    raw_rewrites = obj.get("rewrite_options")
+    if isinstance(raw_rewrites, list):
+        for item in raw_rewrites[:3]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") if isinstance(item.get("label"), str) else "Rewrite"
+            text_v = item.get("text") if isinstance(item.get("text"), str) else ""
+            rationale = item.get("rationale") if isinstance(item.get("rationale"), str) else ""
+            rewrites.append({"label": label[:30], "text": text_v[:500], "rationale": rationale})
+    if len(rewrites) < 2:
+        while len(rewrites) < 2:
+            rewrites.append({
+                "label": "Original",
+                "text": draft[:500],
+                "rationale": "No alternative generated.",
+            })
+    out["rewrite_options"] = rewrites
+
+    cd = obj.get("comparable_discourse")
+    out["comparable_discourse"] = cd if isinstance(cd, str) else ""
+
+    return out
+
+
+def _format_thread_for_report(posts: list[dict[str, Any]]) -> str:
+    """Render the cumulative thread as one structured block for the report prompt.
+
+    Each line: `[round R | postId | parent | archetype @handle (sentiment)] text`.
+    Full text — no per-post truncation. The thinking model's 1M context fits
+    well over the cap (≤120 posts × ≤400 chars ≈ 50KB).
+    """
+    if not posts:
+        return "(no replies were generated)"
+    lines: list[str] = []
+    for p in posts:
+        agent = p.get("agent") or {}
+        lines.append(
+            f"[r{p.get('round','?')} {p.get('id','?')} parent={p.get('parent','?')} "
+            f"{agent.get('archetype','?')} {agent.get('handle','?')} "
+            f"sent={p.get('sentiment',0):+.2f}] "
+            f"{(p.get('text') or '').strip()}"
+        )
+    return "\n".join(lines)
+
+
+async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str, Any]:
+    """Generate a fresh full report for `sim_id` via the thinking model.
+
+    Loads draft + audience + the cumulative thread from SQLite (latest
+    round_events row). Builds a long structured prompt. ONE thinking-model
+    call with `response_schema` matching §12. Returns the §12 wire shape:
+
+        { simulation_id, draft, audience_label, rounds, post_count,
+          generated_at, model, report }
+
+    The caller (POST /report) is responsible for persisting via
+    `db.upsert_report` and serving the wire shape. This function does NOT
+    persist by itself — keeps swarm.py free of HTTP concerns.
+
+    Raises:
+        ReportSimNotFoundError — sim_id missing from DB.
+        GeminiUnavailableError — thinking call failed (timeout / 5xx / auth).
+        BudgetExceededError — per-call counter rejected (won't trigger here
+            because the counter is dedicated to this single call).
+    """
+    # Local imports to avoid circular module load (db imports nothing from swarm).
+    from datetime import datetime, timezone
+    from .db import get_audience, get_simulation_full
+
+    full = get_simulation_full(sim_id)
+    if full is None:
+        raise ReportSimNotFoundError(sim_id)
+
+    draft: str = full.get("draft") or ""
+    posts: list[dict[str, Any]] = full.get("posts") or []
+    rounds: int = int(full.get("rounds") or 0)
+
+    # Recover audience metadata via the simulations row (we only have draft +
+    # posts from get_simulation_full). Cheap second SELECT.
+    from .db import get_simulation
+    sim_row = get_simulation(sim_id)
+    audience: dict[str, Any] | None = None
+    if sim_row and sim_row.get("audience_id"):
+        audience = get_audience(sim_row["audience_id"])
+    audience_label = audience.get("name") if audience else "Unknown audience"
+    audience_blurb = _audience_blurb(audience) if audience else "Unknown audience"
+
+    if client is None:
+        client = _make_client()
+
+    # Dedicated per-call counter — /report is not part of a sim-bound budget.
+    # The process-global semaphore (≤6) still gates concurrency.
+    budget = BudgetCounter(max_calls=1)
+
+    thread_block = _format_thread_for_report(posts)
+
+    system = (
+        "You are a senior PR / communications strategist. Read a 200-persona "
+        "reaction simulation for a draft social post and produce a structured, "
+        "editorial-tone report on how the public will receive it. Be honest, "
+        "specific, and concrete — never generic, never encouraging-by-default. "
+        "Cite quotes verbatim from the thread when grounding claims. "
+        "Output ONLY a single JSON object matching the schema. No prose, no "
+        "markdown fences, no preamble."
+    )
+
+    user = (
+        "## DRAFT POST\n"
+        f'"""\n{draft}\n"""\n\n'
+        f"## AUDIENCE\n{audience_blurb}\n"
+        f"(label: {audience_label})\n\n"
+        f"## THREAD ({len(posts)} posts across {rounds} rounds)\n"
+        f"Format: [round | post_id | parent | archetype handle sent=N] text\n\n"
+        f"{thread_block}\n\n"
+        "## TASK\n"
+        "Return a JSON object with EXACTLY these keys:\n"
+        "  executive_summary  — 3-5 sentences, the headline take.\n"
+        "  verdict            — one of: ship | revise | rethink.\n"
+        "  verdict_rationale  — 1-2 sentences explaining the verdict.\n"
+        "  audience_reception — array of EXACTLY 6 entries, one per archetype "
+        "(skeptic, enthusiast, curious, practitioner, pedant, lurker), each with "
+        "{archetype, tone (positive|caution|danger|neutral), summary (2-3 sentences), "
+        "representative_quote (≤200 chars, lifted verbatim from a real post by that "
+        "archetype if any exists; empty string otherwise)}.\n"
+        "  risk_vectors       — 2-4 items, each with "
+        "{label (≤30 chars), severity (low|medium|high), detail (2-3 sentences)}.\n"
+        "  rewrite_options    — 2-3 items, each with "
+        "{label (≤30 chars, e.g. \"Softer framing\"), text (≤500 chars; the actual "
+        "rewrite), rationale (1-2 sentences on why this addresses what)}.\n"
+        "  comparable_discourse — 2-3 sentences referencing similar real-world "
+        "reactions, OR an empty string if you decline.\n"
+    )
+
+    try:
+        raw = await _call_gemini_thinking(
+            system=system,
+            user=user,
+            schema=_REPORT_SCHEMA,
+            budget=budget,
+            client=client,
+            temperature=0.55,
+            max_tokens=8192,
+            thinking_level="high",
+            timeout=THINKING_CALL_TIMEOUT,
+            raise_on_failure=True,
+        )
+    except (asyncio.TimeoutError, BudgetExceededError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — single retry, then 502
+        log.warning("generate_report first attempt failed: %r — retrying once", exc)
+        try:
+            raw = await _call_gemini_thinking(
+                system=system,
+                user=user,
+                schema=_REPORT_SCHEMA,
+                budget=BudgetCounter(max_calls=1),
+                client=client,
+                temperature=0.55,
+                max_tokens=8192,
+                thinking_level="high",
+                timeout=THINKING_CALL_TIMEOUT,
+                raise_on_failure=True,
+            )
+        except Exception as exc2:  # noqa: BLE001
+            log.exception("generate_report retry failed: %r", exc2)
+            raise GeminiUnavailableError(str(exc2)) from exc2
+
+    if not raw or not raw.strip():
+        # Treat empty body as upstream failure too — easier to debug than a
+        # silent fallback report.
+        raise GeminiUnavailableError("thinking model returned empty response")
+
+    parsed_report = _parse_report(raw, draft)
+
+    return {
+        "simulation_id": sim_id,
+        "draft": draft,
+        "audience_label": audience_label,
+        "rounds": rounds,
+        "post_count": len(posts),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "model": GEMINI_ANALYSIS_MODEL,
+        "report": parsed_report,
+    }

@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from .db import (
     get_analysis,
     get_audience,
+    get_report,
     get_simulation,
     get_simulation_full,
     init_db,
@@ -34,8 +35,15 @@ from .db import (
     insert_simulation,
     list_simulations,
     upsert_analysis,
+    upsert_report,
 )
-from .swarm import default_audience_archetypes, run_simulation
+from .swarm import (
+    GeminiUnavailableError,
+    ReportSimNotFoundError,
+    default_audience_archetypes,
+    generate_report,
+    run_simulation,
+)
 
 log = logging.getLogger("echo.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -88,7 +96,9 @@ _SIMULATION_ID_PATTERN = r"^sim_[0-9a-f]{10}$"
 
 
 class SimulateStartRequest(BaseModel):
-    draft: str = Field(min_length=1, max_length=1000)
+    # v3 (CONTRACTS §13): draft cap raised 1000 → 3500 chars to support
+    # PR posts, product launches, LinkedIn long-form, Twitter/X premium.
+    draft: str = Field(min_length=1, max_length=3500)
     audience_id: str = Field(pattern=_AUDIENCE_ID_PATTERN)
     rounds: int = Field(default=5, ge=3, le=6)
 
@@ -163,6 +173,47 @@ class ReplayResponse(BaseModel):
     posts: list[ReplayPost]
     analysis: ReplayAnalysis | None
     created_at: str
+
+
+# v3 (CONTRACTS §12): /report response models. Locked shapes.
+class ReportAudienceReceptionItem(BaseModel):
+    archetype: Literal["skeptic", "enthusiast", "curious", "practitioner", "pedant", "lurker"]
+    tone: Literal["positive", "caution", "danger", "neutral"]
+    summary: str
+    representative_quote: str
+
+
+class ReportRiskVector(BaseModel):
+    label: str
+    severity: Literal["low", "medium", "high"]
+    detail: str
+
+
+class ReportRewriteOption(BaseModel):
+    label: str
+    text: str
+    rationale: str
+
+
+class ReportBody(BaseModel):
+    executive_summary: str
+    verdict: Literal["ship", "revise", "rethink"]
+    verdict_rationale: str
+    audience_reception: list[ReportAudienceReceptionItem]
+    risk_vectors: list[ReportRiskVector]
+    rewrite_options: list[ReportRewriteOption]
+    comparable_discourse: str
+
+
+class ReportResponse(BaseModel):
+    simulation_id: str
+    draft: str
+    audience_label: str
+    rounds: int
+    post_count: int
+    generated_at: str
+    model: str
+    report: ReportBody
 
 
 # ---------------------------------------------------------------- endpoints
@@ -313,6 +364,93 @@ def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
     except Exception as exc:  # noqa: BLE001
         log.exception("/history failed: %r", exc)
         raise _bad(500, "internal_error", "history read failed")
+
+
+# v3 (CONTRACTS §12, §14): per-sim concurrency guard for /report.
+# Process-local — fine for single-worker uvicorn. Multi-worker deployments
+# would need a DB-backed advisory lock, but the hackathon stack is single-proc.
+_REPORT_LOCKS: dict[str, asyncio.Lock] = {}
+_REPORT_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _get_report_lock(sim_id: str) -> asyncio.Lock:
+    async with _REPORT_LOCKS_GUARD:
+        lock = _REPORT_LOCKS.get(sim_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _REPORT_LOCKS[sim_id] = lock
+        return lock
+
+
+@app.post("/report", response_model=ReportResponse)
+async def report(
+    simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    regenerate: bool = Query(default=False),
+) -> ReportResponse:
+    sim = get_simulation(simulation_id)
+    if not sim:
+        raise _bad(404, "unknown_simulation", "simulation not found")
+
+    # Cache hit path: cheap return when not regenerating.
+    if not regenerate:
+        cached = get_report(simulation_id)
+        if cached is not None:
+            try:
+                return ReportResponse(**cached)
+            except Exception as exc:  # noqa: BLE001
+                # Persisted row malformed (e.g. wrote with old shape). Fall
+                # through to regenerate rather than 500.
+                log.warning("/report cached row malformed for %s: %r — regenerating", simulation_id, exc)
+
+    lock = await _get_report_lock(simulation_id)
+    if lock.locked():
+        # Another /report call for this sim is in flight. Don't queue — let
+        # the client decide whether to retry. (The frontend can poll.)
+        raise _bad(409, "report_pending", "a report is already being generated for this simulation")
+
+    async with lock:
+        # Double-check cache inside the lock — a competing call may have just
+        # finished and persisted while we were waiting on the guard.
+        if not regenerate:
+            cached = get_report(simulation_id)
+            if cached is not None:
+                try:
+                    return ReportResponse(**cached)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            payload = await generate_report(simulation_id)
+        except ReportSimNotFoundError:
+            # Race: sim was deleted between our pre-check and generate. 404.
+            raise _bad(404, "unknown_simulation", "simulation not found")
+        except GeminiUnavailableError as exc:
+            log.warning("/report gemini upstream failed for %s: %s", simulation_id, exc)
+            raise HTTPException(
+                status_code=502,
+                detail={"detail": "thinking model unavailable", "code": "gemini_unavailable"},
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("/report failed for %s: %r", simulation_id, exc)
+            raise _bad(500, "internal_error", "report generation failed")
+
+        try:
+            upsert_report(simulation_id, payload, payload.get("model", ""))
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal: still serve the freshly generated report — the next
+            # /report call will just regenerate. Log loud.
+            log.exception("/report upsert failed for %s: %r", simulation_id, exc)
+
+        # Re-read so `generated_at` reflects the DB-stamped time on cache hits.
+        # (Inline call uses the in-memory payload; downstream reads of /report
+        # see the persisted timestamp which may differ by ms.)
+        try:
+            return ReportResponse(**payload)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("/report response shape invalid for %s: %r", simulation_id, exc)
+            raise _bad(500, "internal_error", "report response shape invalid")
 
 
 @app.get("/simulate/replay", response_model=ReplayResponse)

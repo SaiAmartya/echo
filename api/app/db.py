@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS analyses (
     payload TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- v3 (CONTRACTS §14): cached full reports, one per simulation.
+CREATE TABLE IF NOT EXISTS reports (
+    simulation_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    model TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -133,6 +141,48 @@ def get_analysis(sim_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM analyses WHERE simulation_id = ?", (sim_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
+
+
+# ---------------------------------------------------------------- v3 reports
+def get_report(sim_id: str) -> dict[str, Any] | None:
+    """Return the cached full report for a sim, or None.
+
+    Returned dict is the full §12 wire shape:
+      { simulation_id, draft, audience_label, rounds, post_count,
+        generated_at, model, report }
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT payload, model, generated_at FROM reports WHERE simulation_id = ?",
+            (sim_id,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        # Persisted payload already carries `model` + `generated_at`; trust the
+        # row columns as authoritative on read.
+        payload["model"] = row["model"]
+        payload["generated_at"] = _iso_z(row["generated_at"])
+        return payload
+
+
+def upsert_report(sim_id: str, payload: dict[str, Any], model: str) -> None:
+    """Persist (or replace) the full report row for a sim.
+
+    `generated_at` defaults to `datetime('now')` on INSERT — but on REPLACE we
+    explicitly stamp it so a regenerate updates the timestamp.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO reports (simulation_id, payload, model, generated_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (sim_id, json.dumps(payload), model),
+        )
 
 
 # ---------------------------------------------------------------- v2 helpers
