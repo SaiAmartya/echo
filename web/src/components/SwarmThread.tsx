@@ -14,7 +14,7 @@
 // like-count generation is gone — TweetCard now consumes wire values per
 // CONTRACTS v6 §21.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ServerPost, SimulationMode } from "@/lib/api";
 import { agentPoint, type Archetype } from "@/lib/swarm-graph";
 import { buildThreadGroups, type SortMode } from "@/lib/tree-builder";
@@ -103,6 +103,7 @@ export function SwarmThread({
   posts,
   mode = "business",
   sortMode = "arrival",
+  rightPanel,
 }: {
   currentRound?: number;
   maxRounds?: number;
@@ -111,6 +112,10 @@ export function SwarmThread({
   posts?: ServerPost[];
   mode?: SimulationMode;
   sortMode?: SortMode;
+  // S1 — when set, the right column renders this node instead of the default
+  // SwarmMap. /simulating uses this to swap in the inline ReportBody panel
+  // (and its pending/failed transitional states) once the SSE stream finishes.
+  rightPanel?: ReactNode;
 }) {
   void maxRounds;
   const { events, agents } = normalize(posts, currentRound);
@@ -149,13 +154,17 @@ export function SwarmThread({
         mode={mode}
         sortMode={sortMode}
       />
-      <SwarmMap
-        posts={events.map((p) => ({ id: p.id, agent: p.agent }))}
-        edges={edges}
-        dogpileIds={dogpileIds}
-        running={running}
-        agents={agents}
-      />
+      {rightPanel !== undefined ? (
+        rightPanel
+      ) : (
+        <SwarmMap
+          posts={events.map((p) => ({ id: p.id, agent: p.agent }))}
+          edges={edges}
+          dogpileIds={dogpileIds}
+          running={running}
+          agents={agents}
+        />
+      )}
     </div>
   );
 }

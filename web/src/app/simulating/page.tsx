@@ -1,16 +1,21 @@
 "use client";
-// 03 — Rounds (live swarm thread, driven by /simulate/stream SSE)
-// Ported from design/echo/project/lib/views.jsx (View03_Rounds)
+// 03 — Rounds (live swarm thread, driven by /simulate/stream SSE).
+// S1 (2026-05-02): post-SSE flow no longer redirects to /report — the right
+// column transitions in place SwarmMap → spinner → ReportBody, with a subtle
+// fullscreen icon as the escape hatch. Replay mode fetches the report up
+// front so both columns render together from frame 1.
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Frame, StepIndicator } from "@/components/Shell";
 import { Button, Icon } from "@/components/ui/Primitives";
+import { ReportSidePanel } from "@/components/ReportSidePanel";
 import { SEED_DRAFT, SwarmThread } from "@/components/SwarmThread";
 import type { SortMode } from "@/lib/tree-builder";
 import {
   api,
   ApiError,
+  type ReportResponse,
   type RoundEvent,
   type ServerPost,
   type SimulateStartResponse,
@@ -31,17 +36,7 @@ function loadMode(): SimulationMode {
 }
 
 const DEFAULT_ROUNDS = 5;
-// Minimum visible time per round so the user actually sees the swarm map
-// populate cluster-by-cluster, the thread fill in, and the dogpile rings
-// animate. Server cadence is ~1.5s/round under Gemini, but we pace defensively
-// in the FE so a fast model (or a future optimization) doesn't collapse the
-// signature visualization into a blink. See debugger commit message for why.
-//
-// Q3: bumped 1.2s → 1.8s baseline + jitter so the X-style typing reveal has
-// room to breathe. Per-round gap = 1800ms ± jitter(-300, +600), drawn fresh
-// each drain so the cadence doesn't feel mechanical. Typing duration in
-// TweetCard caps at ~1.2s (≈70% of the gap floor) so each reply finishes
-// before the next card slides in.
+// Q3 paced ingest: per-round gap = 1800ms ± jitter(-300, +600).
 const MIN_ROUND_VISIBLE_MS = 1800;
 const ROUND_JITTER_MIN_MS = -300;
 const ROUND_JITTER_MAX_MS = 600;
@@ -49,16 +44,9 @@ function jitteredGap(): number {
   const span = ROUND_JITTER_MAX_MS - ROUND_JITTER_MIN_MS;
   return MIN_ROUND_VISIBLE_MS + ROUND_JITTER_MIN_MS + Math.random() * span;
 }
-// After the report POSTs back 200, wait this long before navigating to /report
-// so the spinner doesn't snap-cut to a dense report page — gives the user a
-// moment of "ok, that's done" before the route flip.
-const REPORT_READY_LINGER_MS = 500;
 
-// Q2 — phase machine for the post-SSE-done flow.
-// streaming → SSE in flight (or replay rendering)
-// report-pending → SSE done; POST /report kicked; waiting for backend
-// report-failed → /report errored (gemini_unavailable / network); user can retry
-type Phase = "streaming" | "report-pending" | "report-failed";
+// S1 — phase machine: streaming → report-pending → (ready | report-failed).
+type Phase = "streaming" | "report-pending" | "report-failed" | "ready";
 
 interface ErrorState {
   code: string;
@@ -108,39 +96,25 @@ function SimulatingInner() {
   const [error, setError] = useState<ErrorState | null>(null);
   const [draft, setDraft] = useState(SEED_DRAFT);
   const [phase, setPhase] = useState<Phase>("streaming");
-  // Default to "business" so the existing @notion attribution keeps appearing
-  // for legacy / unset cases. Live mode hydrates from sessionStorage; replay
-  // mode overwrites from the /simulate/replay payload.
+  const [report, setReport] = useState<ReportResponse | null>(null);
+  // Default "business" preserves @notion attribution for legacy/unset cases.
+  // Live hydrates from sessionStorage; replay overwrites from server payload.
   const [mode, setMode] = useState<SimulationMode>("business");
-  // R2 — top-level thread ordering. Live sims start in "arrival" so posts
-  // appear in arrival/round-id order while engagement signal is still
-  // building; on phase → report-pending, we flip to "engagement" which
-  // triggers the FLIP animated re-sort to engagement-DESC. Replay mode
-  // starts in "engagement" since the final state is already known.
+  // R2 — top-level thread ordering. Live starts arrival; replay starts
+  // engagement since the final state is already known.
   const [sortMode, setSortMode] = useState<SortMode>(
     isReplay ? "engagement" : "arrival",
   );
   const sourceRef = useRef<EventSource | null>(null);
 
-  // Paced ingest. Server can deliver round events back-to-back when the LLM is
-  // hot or short — instead of letting React batch them into a single render
-  // (which makes /simulating look broken), we queue and drain at a minimum
-  // 1.2s cadence. `doneSeen` is a flag so the drain loop knows when there's
-  // no more inbound work and it's safe to schedule the linger + redirect.
+  // Paced ingest (Q3 / L10): queue + drain at jittered cadence so SSE bursts
+  // don't collapse into one paint.
   const queueRef = useRef<RoundEvent[]>([]);
   const doneSeenRef = useRef(false);
   const lastAppliedAtRef = useRef(0);
   const drainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Q2 — guard the report POST against component unmount and re-mount races
-  // (StrictMode dev double-mount, route changes mid-flight). Backend handles
-  // duplicate POSTs idempotently (per L11 / v3 §12 lock+cache pattern), but
-  // we don't want a stale response setting state on a dead component.
-  const reportInFlightRef = useRef(false);
+  const reportInFlightRef = useRef(false); // Q2 unmount/remount guard
 
-  // Pull initial total rounds from sessionStorage if present (so the topbar
-  // doesn't briefly say "of 5" when the user picked 3). Skipped in replay mode
-  // — replay reads draft + rounds from the server payload instead.
   useEffect(() => {
     if (isReplay) return;
     const sim = loadSimulation();
@@ -149,55 +123,42 @@ function SimulatingInner() {
     setMode(loadMode());
   }, [isReplay]);
 
-  // Q2 — kick the /report POST and gate the redirect on its 200. Memoized so
-  // the Retry button can re-fire it from the failed state without remounting
-  // the whole effect. `cancelled` is captured per call to keep the latest
-  // attempt's response from clobbering state if the user navigates away.
-  const kickReport = useCallback(
-    (simId: string) => {
-      if (reportInFlightRef.current) return;
-      reportInFlightRef.current = true;
-      setPhase("report-pending");
-      // R2 — flip top-level thread order to engagement-DESC. SwarmThread's
-      // FLIP useLayoutEffect picks up the change and animates the re-sort.
-      // Sub-thread chronology is preserved by the tree-builder.
-      setSortMode("engagement");
-
-      let cancelled = false;
-      void (async () => {
-        try {
-          await api.generateReport({ simulation_id: simId });
-          if (cancelled) return;
-          // Brief settle pause so the spinner doesn't hard-cut to /report.
-          if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
-          redirectTimerRef.current = setTimeout(() => {
-            router.push(`/report?id=${encodeURIComponent(simId)}`);
-          }, REPORT_READY_LINGER_MS);
-        } catch (e) {
-          if (cancelled) return;
-          // Surface anything the user can usefully retry (502 gemini, network,
-          // generic) as report-failed. The component renders a Retry button.
-          // 409 report_pending shouldn't happen here in practice (we only POST
-          // once after done), but if it does, treat it as success-pending and
-          // navigate — backend lock + cache means /report?id will resolve.
-          if (e instanceof ApiError && e.code === "report_pending") {
-            redirectTimerRef.current = setTimeout(() => {
-              router.push(`/report?id=${encodeURIComponent(simId)}`);
-            }, REPORT_READY_LINGER_MS);
+  // S1 — kick /report POST and transition into inline `ready` when it lands.
+  // Memoized so Retry can re-fire from the failed state. R2 also flips top
+  // sort to engagement-DESC so the SwarmThread FLIP animates the re-sort.
+  const kickReport = useCallback((simId: string) => {
+    if (reportInFlightRef.current) return;
+    reportInFlightRef.current = true;
+    setPhase("report-pending");
+    setSortMode("engagement");
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await api.generateReport({ simulation_id: simId });
+        if (cancelled) return;
+        setReport(result);
+        setPhase("ready");
+      } catch (e) {
+        if (cancelled) return;
+        // 409 report_pending: benign StrictMode race; retry once.
+        if (e instanceof ApiError && e.code === "report_pending") {
+          try {
+            const result = await api.generateReport({ simulation_id: simId });
+            if (cancelled) return;
+            setReport(result);
+            setPhase("ready");
             return;
+          } catch {
+            /* fall through */
           }
-          setPhase("report-failed");
-        } finally {
-          reportInFlightRef.current = false;
         }
-      })();
-
-      return () => {
-        cancelled = true;
-      };
-    },
-    [router],
-  );
+        setPhase("report-failed");
+      } finally {
+        reportInFlightRef.current = false;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!id) {
@@ -212,17 +173,8 @@ function SimulatingInner() {
     lastAppliedAtRef.current = 0;
     reportInFlightRef.current = false;
     if (drainTimerRef.current) clearTimeout(drainTimerRef.current);
-    if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
 
     // ---- Shared paced-ingest machinery (used by both live SSE and replay).
-    // Live mode: when the queue drains and `done` was seen, we transition into
-    // the report-pending phase (Q2): keep the thread visible, render a status
-    // panel below it, POST /report, and only redirect after the backend
-    // confirms the report exists. The old 2s pre-redirect linger is gone —
-    // the report POST IS the linger now (and it usually beats 2s anyway, since
-    // run_simulation fires a fire-and-forget /report at end-of-sim per L11).
-    // Replay mode: settle into done state and let the user nav back manually;
-    // no report POST.
     const finish = () => {
       setRunning(false);
       setDone(true);
@@ -246,7 +198,6 @@ function SimulatingInner() {
         if (queueRef.current.length > 0) {
           drainTimerRef.current = setTimeout(drain, jitteredGap());
         } else if (doneSeenRef.current) {
-          // No more inbound work — finish after honoring this round's gap.
           drainTimerRef.current = setTimeout(finish, jitteredGap());
         }
         return;
@@ -255,42 +206,57 @@ function SimulatingInner() {
     };
 
     const scheduleDrain = () => {
-      if (drainTimerRef.current) return;             // already armed
+      if (drainTimerRef.current) return;
       const since = Date.now() - lastAppliedAtRef.current;
       const wait =
         lastAppliedAtRef.current === 0
-          ? 0                                        // first round paints immediately
+          ? 0
           : Math.max(0, jitteredGap() - since);
       drainTimerRef.current = setTimeout(drain, wait);
     };
 
-    // ---------- Replay mode: read persisted sim and feed the same paced queue.
+    // ---------- Replay mode: fetch persisted sim + report in parallel.
+    // Replay drives the paced queue (must succeed); report is best-effort
+    // (old sims may not have a cached row). On report failure we drop into
+    // report-failed so the side panel can offer a retry.
     if (isReplay) {
       let cancelled = false;
       void (async () => {
+        const replayP = api.getReplay(id);
+        const reportP = api
+          .generateReport({ simulation_id: id })
+          .then((r): ReportResponse | null => r)
+          .catch(() => null);
+        let replay;
         try {
-          const replay = await api.getReplay(id);
-          if (cancelled) return;
-          setDraft(replay.draft);
-          setMaxRounds(replay.rounds);
-          setMode(replay.mode);
-          // Partition cumulative posts by round into RoundEvent-shaped slices.
-          // posts[] is sorted (round asc, id asc) per contract; for each round
-          // r we emit the full set of posts where round <= r so the SwarmThread
-          // sees the same cumulative ingest it gets over SSE.
-          const total = replay.rounds;
-          for (let r = 1; r <= total; r += 1) {
-            const slice = replay.posts.filter((p) => p.round <= r);
-            queueRef.current.push({ round: r, of: total, posts: slice });
-          }
-          doneSeenRef.current = true;
-          scheduleDrain();
+          replay = await replayP;
         } catch (e) {
           if (cancelled) return;
-          const message =
-            e instanceof Error ? e.message : "Failed to load replay.";
+          const message = e instanceof Error ? e.message : "Failed to load replay.";
           setError({ code: "internal_error", message });
           setRunning(false);
+          return;
+        }
+        if (cancelled) return;
+        setDraft(replay.draft);
+        setMaxRounds(replay.rounds);
+        setMode(replay.mode);
+        // Partition cumulative posts by round (sorted round asc, id asc per contract).
+        const total = replay.rounds;
+        for (let r = 1; r <= total; r += 1) {
+          const slice = replay.posts.filter((p) => p.round <= r);
+          queueRef.current.push({ round: r, of: total, posts: slice });
+        }
+        doneSeenRef.current = true;
+        scheduleDrain();
+        setPhase("report-pending");
+        const reportResult = await reportP;
+        if (cancelled) return;
+        if (reportResult) {
+          setReport(reportResult);
+          setPhase("ready");
+        } else {
+          setPhase("report-failed");
         }
       })();
       return () => {
@@ -298,10 +264,6 @@ function SimulatingInner() {
         if (drainTimerRef.current) {
           clearTimeout(drainTimerRef.current);
           drainTimerRef.current = null;
-        }
-        if (redirectTimerRef.current) {
-          clearTimeout(redirectTimerRef.current);
-          redirectTimerRef.current = null;
         }
       };
     }
@@ -363,10 +325,6 @@ function SimulatingInner() {
         clearTimeout(drainTimerRef.current);
         drainTimerRef.current = null;
       }
-      if (redirectTimerRef.current) {
-        clearTimeout(redirectTimerRef.current);
-        redirectTimerRef.current = null;
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, router, isReplay, kickReport]);
@@ -378,16 +336,25 @@ function SimulatingInner() {
       clearTimeout(drainTimerRef.current);
       drainTimerRef.current = null;
     }
-    if (redirectTimerRef.current) {
-      clearTimeout(redirectTimerRef.current);
-      redirectTimerRef.current = null;
-    }
   };
 
   const onRetry = () => {
     if (!id) return;
-    // Re-mount by pushing the same path — useEffect re-runs on the new searchParams ref.
-    router.push(`/simulating?id=${encodeURIComponent(id)}&t=${Date.now()}`);
+    router.push(
+      `/simulating?id=${encodeURIComponent(id)}&t=${Date.now()}`,
+    );
+  };
+
+  const onUseRewrite = (text: string) => {
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem("echo:draft", text);
+    }
+    router.push("/compose");
+  };
+
+  const onFullscreen = () => {
+    if (!id) return;
+    router.push(`/report?id=${encodeURIComponent(id)}`);
   };
 
   const baseLabel = error
@@ -399,7 +366,23 @@ function SimulatingInner() {
           ? `Replay · Round ${round} of ${maxRounds}`
           : "Simulation complete"
         : "Paused";
-  const topbarLabel = isReplay && !error ? `Replay · Round ${round} of ${maxRounds}` : baseLabel;
+  const topbarLabel =
+    isReplay && !error ? `Replay · Round ${round} of ${maxRounds}` : baseLabel;
+
+  // S1 — right-column content is phase-driven. Default (undefined) lets
+  // SwarmThread render its built-in SwarmMap.
+  const showRightOverride =
+    phase === "report-pending" || phase === "report-failed" || phase === "ready";
+  const rightPanel = showRightOverride ? (
+    <ReportSidePanel
+      phase={phase}
+      report={report}
+      onRetry={() => id && kickReport(id)}
+      onFullscreen={onFullscreen}
+      onUseRewrite={onUseRewrite}
+      canRetry={Boolean(id)}
+    />
+  ) : undefined;
 
   return (
     <Frame
@@ -451,7 +434,8 @@ function SimulatingInner() {
             }}
           >
             <span style={{ flex: 1 }}>
-              {errorCopy(error.code)} <span style={{ opacity: 0.7 }}>({error.code})</span>
+              {errorCopy(error.code)}{" "}
+              <span style={{ opacity: 0.7 }}>({error.code})</span>
             </span>
             <Button variant="secondary" size="sm" onClick={onRetry}>
               Retry
@@ -467,72 +451,11 @@ function SimulatingInner() {
             posts={posts}
             mode={mode}
             sortMode={sortMode}
+            rightPanel={rightPanel}
           />
         </div>
-        {/* Q2 — report-readiness status panel. Lives below the SwarmThread,
-            above the footer, centered. Only renders for live sims after the
-            SSE done event; replay never enters report-pending. */}
-        {!isReplay && !error && (phase === "report-pending" || phase === "report-failed") && (
-          <div
-            role="status"
-            aria-live="polite"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 12,
-              padding: "12px 16px",
-              background: "var(--surface)",
-              border: "1px solid var(--border)",
-              borderRadius: 10,
-              fontSize: 13,
-              color: "var(--fg-1)",
-            }}
-          >
-            {phase === "report-pending" ? (
-              <>
-                <span
-                  aria-hidden
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: 999,
-                    border: "2px solid var(--border-strong)",
-                    borderTopColor: "var(--fg-1)",
-                    animationName: "echo-spin",
-                    animationDuration: "0.8s",
-                    animationIterationCount: "infinite",
-                    animationTimingFunction: "linear",
-                  }}
-                />
-                <span style={{ color: "var(--fg-2)" }}>Analysis report generating…</span>
-              </>
-            ) : (
-              <>
-                <span style={{ color: "#f06c5a" }}>Report generation failed.</span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => id && kickReport(id)}
-                  disabled={!id}
-                >
-                  Retry report generation
-                </Button>
-              </>
-            )}
-          </div>
-        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          {isReplay ? (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={!id}
-              onClick={() => id && router.push(`/report?id=${encodeURIComponent(id)}`)}
-            >
-              Back to report
-            </Button>
-          ) : running ? (
+          {running ? (
             <Button
               variant="ghost"
               size="sm"
@@ -541,14 +464,16 @@ function SimulatingInner() {
             >
               Pause
             </Button>
-          ) : phase === "streaming" ? (
+          ) : phase === "streaming" && !isReplay ? (
             // Edge case: SSE errored or paused before done (so phase never
             // advanced). Keep the legacy "See report" CTA available.
             <Button
               variant="primary"
               size="sm"
               disabled={!done || !id}
-              onClick={() => id && router.push(`/report?id=${encodeURIComponent(id)}`)}
+              onClick={() =>
+                id && router.push(`/report?id=${encodeURIComponent(id)}`)
+              }
             >
               See report
             </Button>

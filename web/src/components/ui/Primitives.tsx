@@ -160,7 +160,7 @@ export type IconName =
   | "play" | "pause" | "users" | "replies" | "trendingUp" | "trendingDown"
   | "alert" | "check" | "x" | "search" | "plus" | "home" | "history"
   | "settings" | "command" | "chevronDown" | "arrowUpRight" | "bookmark"
-  | "zap" | "sparkles" | "refresh"
+  | "zap" | "sparkles" | "refresh" | "expand"
   | "reply" | "retweet" | "heart" | "heartFilled" | "share";
 
 export function Icon({
@@ -281,6 +281,15 @@ export function Icon({
       <g>
         <path d="M21 12a9 9 0 1 1-3-6.7" />
         <polyline points="21,4 21,9 16,9" />
+      </g>
+    ),
+    expand: (
+      <g>
+        {/* Two-arrows-out-of-corners; subtle fullscreen affordance. */}
+        <polyline points="15,4 20,4 20,9" />
+        <polyline points="9,20 4,20 4,15" />
+        <line x1="20" y1="4" x2="14" y2="10" />
+        <line x1="4" y1="20" x2="10" y2="14" />
       </g>
     ),
     reply: (
