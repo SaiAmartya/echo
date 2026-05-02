@@ -27,10 +27,12 @@ from .db import (
     get_analysis,
     get_audience,
     get_simulation,
+    get_simulation_full,
     init_db,
     insert_audience,
     insert_round_event,
     insert_simulation,
+    list_simulations,
     upsert_analysis,
 )
 from .swarm import default_audience_archetypes, run_simulation
@@ -103,6 +105,54 @@ class AnalyzeResponse(BaseModel):
     tldr: str
     suggested_rewrite: SuggestedRewrite
     worth_reading: list[WorthReadingItem]
+
+
+# v2 additive: history list item + replay payload (read-only, zero LLM)
+class HistoryItem(BaseModel):
+    simulation_id: str
+    draft: str
+    rounds: int
+    post_count: int
+    tone: Literal["positive", "caution", "danger", "neutral"]
+    mean_sentiment: float
+    created_at: str
+    has_analysis: bool
+
+
+class HistoryResponse(BaseModel):
+    items: list[HistoryItem]
+
+
+class ReplayAgent(BaseModel):
+    id: str
+    name: str
+    handle: str
+    archetype: Literal["skeptic", "enthusiast", "curious", "practitioner", "pedant", "lurker"]
+    audience: Literal["target", "public"]
+
+
+class ReplayPost(BaseModel):
+    id: str
+    parent: str
+    round: int
+    agent: ReplayAgent
+    sentiment: float
+    text: str
+
+
+class ReplayAnalysis(BaseModel):
+    tldr: str
+    suggested_rewrite: SuggestedRewrite
+    worth_reading: list[WorthReadingItem]
+
+
+class ReplayResponse(BaseModel):
+    simulation_id: str
+    draft: str
+    rounds: int
+    posts: list[ReplayPost]
+    analysis: ReplayAnalysis | None
+    created_at: str
 
 
 # ---------------------------------------------------------------- endpoints
@@ -233,3 +283,55 @@ def analyze(simulation_id: str = Query(...)) -> AnalyzeResponse:
         suggested_rewrite=SuggestedRewrite(**cached["suggested_rewrite"]),
         worth_reading=[WorthReadingItem(**w) for w in cached["worth_reading"]],
     )
+
+
+# ----------------------------------------------------- v2 additive endpoints
+# Both endpoints below are read-only — ZERO LLM calls (per .team/RULES.md R2).
+# Wire shape locked in CONTRACTS.md §8/§9. v1 endpoints above are untouched.
+
+@app.get("/history", response_model=HistoryResponse)
+def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
+    try:
+        items = list_simulations(limit)
+        return HistoryResponse(items=[HistoryItem(**it) for it in items])
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/history failed: %r", exc)
+        raise _bad(500, "internal_error", "history read failed")
+
+
+@app.get("/simulate/replay", response_model=ReplayResponse)
+def simulate_replay(simulation_id: str = Query(...)) -> ReplayResponse:
+    try:
+        full = get_simulation_full(simulation_id)
+        if full is None:
+            raise _bad(404, "unknown_simulation", "simulation not found")
+
+        analysis_obj: ReplayAnalysis | None = None
+        analysis_dict = full.get("analysis")
+        if isinstance(analysis_dict, dict):
+            try:
+                analysis_obj = ReplayAnalysis(
+                    tldr=analysis_dict["tldr"],
+                    suggested_rewrite=SuggestedRewrite(**analysis_dict["suggested_rewrite"]),
+                    worth_reading=[WorthReadingItem(**w) for w in analysis_dict["worth_reading"]],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                # Persisted analysis is malformed — surface as null rather than 500.
+                log.warning("replay: skipping malformed analysis for %s: %r", simulation_id, exc)
+                analysis_obj = None
+
+        return ReplayResponse(
+            simulation_id=full["simulation_id"],
+            draft=full["draft"],
+            rounds=int(full["rounds"]),
+            posts=[ReplayPost(**p) for p in full["posts"]],
+            analysis=analysis_obj,
+            created_at=full["created_at"],
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("/simulate/replay failed: %r", exc)
+        raise _bad(500, "internal_error", "replay read failed")

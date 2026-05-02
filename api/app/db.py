@@ -133,3 +133,172 @@ def get_analysis(sim_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM analyses WHERE simulation_id = ?", (sim_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
+
+
+# ---------------------------------------------------------------- v2 helpers
+def _tone_from_mean(mean: float | None, has_analysis: bool) -> str:
+    """Tone bucket per CONTRACTS v2 §8.
+
+    positive  → mean >=  0.20
+    caution   → mean ∈ [-0.10, 0.20)
+    danger    → mean <  -0.10
+    neutral   → analysis missing / sim incomplete (or no posts at all)
+    """
+    if not has_analysis or mean is None:
+        return "neutral"
+    if mean >= 0.20:
+        return "positive"
+    if mean >= -0.10:
+        return "caution"
+    return "danger"
+
+
+def _iso_z(ts: str | None) -> str:
+    """SQLite stores `datetime('now')` as 'YYYY-MM-DD HH:MM:SS' (UTC).
+    Render as ISO-8601 with trailing Z so frontends can `new Date(...)` it."""
+    if not ts:
+        return ""
+    if "T" in ts and ts.endswith("Z"):
+        return ts
+    return ts.replace(" ", "T") + "Z"
+
+
+def _latest_round_payload(conn: sqlite3.Connection, sim_id: str) -> dict[str, Any] | None:
+    """Highest-round persisted round_event payload for a sim. None if no events."""
+    row = conn.execute(
+        "SELECT payload FROM round_events WHERE simulation_id = ? "
+        "ORDER BY round DESC, id DESC LIMIT 1",
+        (sim_id,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+
+
+def list_simulations(limit: int) -> list[dict[str, Any]]:
+    """List simulations newest first with analysis-derived stats.
+
+    Per CONTRACTS v2 §8: each row carries a 240-char draft preview, post_count
+    and mean_sentiment computed from the latest cumulative `round_events.payload`,
+    and a tone bucket via `_tone_from_mean`.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    items: list[dict[str, Any]] = []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.id          AS simulation_id,
+                   s.draft       AS draft,
+                   s.rounds      AS rounds,
+                   s.created_at  AS created_at,
+                   a.payload     AS analysis_payload
+            FROM simulations s
+            LEFT JOIN analyses a ON a.simulation_id = s.id
+            ORDER BY s.rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        for row in rows:
+            sim_id = row["simulation_id"]
+            payload = _latest_round_payload(conn, sim_id)
+            posts = payload.get("posts", []) if isinstance(payload, dict) else []
+            post_count = len(posts)
+
+            sentiments = [
+                float(p["sentiment"])
+                for p in posts
+                if isinstance(p, dict) and isinstance(p.get("sentiment"), (int, float))
+            ]
+            mean_sentiment = (sum(sentiments) / len(sentiments)) if sentiments else 0.0
+            mean_sentiment = round(mean_sentiment, 2)
+
+            has_analysis = row["analysis_payload"] is not None
+            # neutral when analysis missing OR sim has no posts yet
+            mean_for_tone = mean_sentiment if (has_analysis and post_count > 0) else None
+            tone = _tone_from_mean(mean_for_tone, has_analysis and post_count > 0)
+
+            draft_full = row["draft"] or ""
+            draft_preview = draft_full[:240]
+
+            items.append(
+                {
+                    "simulation_id": sim_id,
+                    "draft": draft_preview,
+                    "rounds": int(row["rounds"]),
+                    "post_count": post_count,
+                    "tone": tone,
+                    "mean_sentiment": mean_sentiment,
+                    "created_at": _iso_z(row["created_at"]),
+                    "has_analysis": has_analysis,
+                }
+            )
+    return items
+
+
+def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
+    """Return the full final state of a simulation for /simulate/replay.
+
+    Shape (CONTRACTS v2 §9):
+      { simulation_id, draft, rounds, posts[], analysis|None, created_at }
+
+    `rounds` is the highest persisted round number (or the registered round count
+    if the sim has no events yet — for "running but nothing emitted" sims).
+    `posts` is the cumulative list from the highest-round payload (already sorted
+    server-side at write time).
+    """
+    with get_conn() as conn:
+        sim_row = conn.execute(
+            "SELECT id, draft, rounds, created_at FROM simulations WHERE id = ?",
+            (sim_id,),
+        ).fetchone()
+        if not sim_row:
+            return None
+
+        latest = conn.execute(
+            "SELECT round, payload FROM round_events WHERE simulation_id = ? "
+            "ORDER BY round DESC, id DESC LIMIT 1",
+            (sim_id,),
+        ).fetchone()
+        posts: list[dict[str, Any]] = []
+        latest_round: int | None = None
+        if latest:
+            latest_round = int(latest["round"])
+            try:
+                payload = json.loads(latest["payload"])
+                if isinstance(payload, dict):
+                    raw_posts = payload.get("posts", [])
+                    if isinstance(raw_posts, list):
+                        posts = raw_posts
+            except (TypeError, ValueError):
+                posts = []
+
+        analysis_row = conn.execute(
+            "SELECT payload FROM analyses WHERE simulation_id = ?",
+            (sim_id,),
+        ).fetchone()
+        analysis: dict[str, Any] | None = None
+        if analysis_row:
+            try:
+                analysis = json.loads(analysis_row["payload"])
+            except (TypeError, ValueError):
+                analysis = None
+
+    rounds = latest_round if latest_round is not None else int(sim_row["rounds"])
+
+    return {
+        "simulation_id": sim_row["id"],
+        "draft": sim_row["draft"],
+        "rounds": rounds,
+        "posts": posts,
+        "analysis": analysis,
+        "created_at": _iso_z(sim_row["created_at"]),
+    }
