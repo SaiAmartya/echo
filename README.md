@@ -12,6 +12,76 @@ echo/
 └── api/                   # FastAPI 0.13x + SQLite
 ```
 
+## Architecture
+
+Two client surfaces (Next.js web app + Textual TUI) converge on the same Gemini-only LLM stack via FastAPI + SQLite. Full notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+```mermaid
+flowchart TD
+    subgraph clients ["Clients"]
+        Web["Next.js Web App"]
+        TUI["Textual TUI (api/tui.py)"]
+    end
+
+    subgraph frontend ["Web Frontend (web/src)"]
+        Composer["Composer.tsx"]
+        SwarmThread["SwarmThread.tsx"]
+        SwarmMap["SwarmMap.tsx"]
+        Report["ReportBody / SidePanel"]
+        APIClient["lib/api.ts (SSE)"]
+        FBClient["lib/firebase (auth)"]
+    end
+
+    subgraph backend ["FastAPI Backend (api/app)"]
+        Main["main.py — HTTP + SSE"]
+        AuthPy["auth.py — Firebase verify"]
+        DB["db.py — SQLite helpers"]
+        SwarmCore["swarm.py — canonical engine"]
+        Personas["personas + persona_genesis"]
+        Canned["canned.py — fixtures"]
+    end
+
+    subgraph engine ["Standalone Swarm Engine (api/engine)"]
+        RoundLoop["round_loop.py"]
+        Archetypes["archetypes + personas"]
+        Schemas["schemas.py (Pydantic v2)"]
+        Prompts["prompts/"]
+        LLM["llm.py — Gemini-only"]
+    end
+
+    subgraph external ["External Services"]
+        GeminiLite["Gemini 2.5 Flash Lite"]
+        GeminiPro["Gemini 3 Flash Preview"]
+        Firebase["Firebase Auth"]
+        SQLite["SQLite (api/echo.db)"]
+    end
+
+    Web --> Composer
+    Web --> FBClient
+    Composer --> APIClient
+    APIClient --> SwarmThread
+    APIClient --> SwarmMap
+    APIClient --> Report
+    APIClient -->|"Bearer token"| Main
+    FBClient -->|"ID token"| Firebase
+
+    Main --> AuthPy
+    Main --> DB
+    Main --> SwarmCore
+    Main --> Canned
+    SwarmCore --> Personas
+    AuthPy --> Firebase
+    DB --> SQLite
+
+    TUI --> RoundLoop
+    RoundLoop --> Archetypes
+    RoundLoop --> Prompts
+    RoundLoop --> LLM
+    LLM --> Schemas
+    LLM --> GeminiLite
+    LLM --> GeminiPro
+```
+
 ## Run it locally
 
 You'll need two terminals — one for the backend, one for the frontend.
@@ -132,12 +202,3 @@ query param because `EventSource` can't attach headers — see
 `api/app/auth.py`). The api accepts any token string when
 `FIREBASE_AUTH_DISABLED=1`. The TUI is a dev/demo tool — production auth is
 out of scope.
-
-## What's intentionally *not* in Step 1
-
-Per `ACTION-PLAN.md`:
-
-- No real LLM calls (Step 2 swaps `simulate_stream` and `analyze` to real Gemini Flash-Lite + Sonnet calls).
-- No real X API (CSV-paste only is acceptable demo theater).
-- No graph DB, no vector DB, no cross-session persona memory.
-- No mobile responsiveness — desktop-first per the design.
