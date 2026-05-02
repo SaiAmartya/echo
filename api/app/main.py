@@ -1,36 +1,42 @@
-"""Echo FastAPI backend — Step 1 stubs.
+"""Echo FastAPI backend — Phase B (Gemini-backed swarm engine).
 
 Endpoints:
-  POST /seed              — build a (canned) audience profile
+  POST /seed              — build (canned) audience profile of the 6 archetypes
   POST /simulate/start    — register a new simulation, return id
-  GET  /simulate/stream   — Server-Sent Events feed of round progress
-  GET  /analyze           — final aggregate (canned)
+  GET  /simulate/stream   — SSE stream of cumulative round events + done/error
+  GET  /analyze           — final aggregated analysis (tldr / rewrite / worth_reading)
 
-Real LLM calls land in Step 2. For Step 1 every response is canned so the
-frontend round-trip can be verified end-to-end on localhost.
+Wire format is locked in .team/CONTRACTS.md. The swarm engine itself lives in
+api/app/swarm.py — this module is the thin HTTP layer.
 """
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from .canned import CANNED_FLAGS, CANNED_REPLIES, CANNED_REWRITE, NOTION_ARCHETYPES
 from .db import (
     get_analysis,
+    get_audience,
     get_simulation,
     init_db,
     insert_audience,
+    insert_round_event,
     insert_simulation,
     upsert_analysis,
 )
+from .swarm import default_audience_archetypes, run_simulation
+
+log = logging.getLogger("echo.api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -38,7 +44,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Echo API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Echo API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,9 +75,9 @@ class SeedResponse(BaseModel):
 
 
 class SimulateStartRequest(BaseModel):
-    draft: str
+    draft: str = Field(min_length=1, max_length=1000)
     audience_id: str
-    rounds: int = Field(default=5, ge=3, le=20)
+    rounds: int = Field(default=5, ge=3, le=6)
 
 
 class SimulateStartResponse(BaseModel):
@@ -80,54 +86,67 @@ class SimulateStartResponse(BaseModel):
     status: str
 
 
-class AnalyzeReply(BaseModel):
-    initials: str
-    name: str
-    handle: str
-    text: str
-    sentiment: float
-    likely: int
-    archetype: str
+class WorthReadingItem(BaseModel):
+    label: str
+    color: str
+    tldr: str
 
 
-class AnalyzeFlag(BaseModel):
-    title: str
-    detail: str
-
-
-class SentimentCounts(BaseModel):
-    pos: int
-    mix: int
-    neg: int
+class SuggestedRewrite(BaseModel):
+    original: str
+    rewrite: str
 
 
 class AnalyzeResponse(BaseModel):
     simulation_id: str
-    ratio_risk: int
-    tone: Literal["positive", "caution", "danger", "neutral"]
-    sentiment: SentimentCounts
-    rewrite: str
-    replies: list[AnalyzeReply]
-    flags: list[AnalyzeFlag]
+    tldr: str
+    suggested_rewrite: SuggestedRewrite
+    worth_reading: list[WorthReadingItem]
 
 
 # ---------------------------------------------------------------- endpoints
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
+
+
+def _bad(status: int, code: str, detail: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"detail": detail, "code": code})
 
 
 @app.post("/seed", response_model=SeedResponse)
 def seed(req: SeedRequest) -> SeedResponse:
+    if req.mode == "csv" and not (req.payload and req.payload.strip()):
+        raise _bad(400, "bad_payload", "CSV payload required for mode=csv")
+    if req.mode == "oauth" and not (req.payload and req.payload.strip()):
+        raise _bad(401, "oauth_failed", "oauth token rejected")
+
     audience_id = f"aud_{uuid.uuid4().hex[:10]}"
-    name = "Notion · core" if req.mode != "oauth" else "X · @you"
-    size = 8420 if req.mode != "oauth" else 4182
-    insert_audience(audience_id, name, size, NOTION_ARCHETYPES)
-    return SeedResponse(audience_id=audience_id, name=name, size=size, archetypes=[Archetype(**a) for a in NOTION_ARCHETYPES])
+    if req.mode == "oauth":
+        name = "X · @you"
+        size = 4182
+    elif req.mode == "csv":
+        name = "Custom · uploaded"
+        size = 1000
+    else:
+        name = "Notion · core"
+        size = 8420
+
+    archetypes = default_audience_archetypes()
+    insert_audience(audience_id, name, size, archetypes)
+    return SeedResponse(
+        audience_id=audience_id,
+        name=name,
+        size=size,
+        archetypes=[Archetype(**a) for a in archetypes],
+    )
 
 
 @app.post("/simulate/start", response_model=SimulateStartResponse)
 def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
+    aud = get_audience(req.audience_id)
+    if not aud:
+        raise _bad(404, "unknown_audience", "audience not found")
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
     insert_simulation(sim_id, req.audience_id, req.draft, req.rounds)
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
@@ -137,39 +156,46 @@ def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
 async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceResponse:
     sim = get_simulation(simulation_id)
     if not sim:
-        raise HTTPException(status_code=404, detail="simulation not found")
+        raise _bad(404, "unknown_simulation", "simulation not found")
+    audience = get_audience(sim["audience_id"])
+    if not audience:
+        raise _bad(404, "unknown_audience", "audience not found")
 
+    draft = sim["draft"]
     rounds = int(sim["rounds"])
 
     async def event_gen():
-        # Step 1: emit one fake round event per second so the frontend can
-        # exercise its SSE handling. Step 2 swaps this for real LLM calls.
-        for r in range(1, rounds + 1):
-            await asyncio.sleep(1.0)
-            agents = min(200, int(200 * r / rounds))
+        try:
+            async for evt in run_simulation(
+                sim_id=simulation_id,
+                draft=draft,
+                audience=audience,
+                rounds=rounds,
+            ):
+                event_name: str = evt.get("event", "message")
+                data: Any = evt.get("data", {})
+
+                if event_name == "round":
+                    insert_round_event(simulation_id, int(data["round"]), data)
+                    yield {"event": "round", "data": json.dumps(data)}
+                elif event_name == "_analysis":
+                    payload = {"simulation_id": simulation_id, **data}
+                    upsert_analysis(simulation_id, payload)
+                    # Don't emit to client — sentinel for persistence only.
+                elif event_name == "done":
+                    yield {"event": "done", "data": json.dumps(data)}
+                elif event_name == "error":
+                    yield {"event": "error", "data": json.dumps(data)}
+                else:
+                    yield {"event": event_name, "data": json.dumps(data)}
+        except Exception as exc:  # noqa: BLE001
+            log.exception("event_gen crashed: %r", exc)
             yield {
-                "event": "round",
-                "data": json.dumps({
-                    "round": r,
-                    "of": rounds,
-                    "agents_responded": agents,
-                    "mean_sentiment": round(-0.08 + (r - 1) * 0.02, 2),
-                }),
+                "event": "error",
+                "data": json.dumps(
+                    {"message": "internal error", "code": "internal_error"}
+                ),
             }
-
-        # Persist canned analysis so /analyze returns it.
-        analysis = {
-            "simulation_id": simulation_id,
-            "ratio_risk": 64,
-            "tone": "caution",
-            "sentiment": {"pos": 92, "mix": 88, "neg": 67},
-            "rewrite": CANNED_REWRITE,
-            "replies": CANNED_REPLIES,
-            "flags": CANNED_FLAGS,
-        }
-        upsert_analysis(simulation_id, analysis)
-
-        yield {"event": "done", "data": json.dumps({"simulation_id": simulation_id})}
 
     return EventSourceResponse(event_gen())
 
@@ -178,21 +204,15 @@ async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceRespons
 def analyze(simulation_id: str = Query(...)) -> AnalyzeResponse:
     sim = get_simulation(simulation_id)
     if not sim:
-        raise HTTPException(status_code=404, detail="simulation not found")
+        raise _bad(404, "unknown_simulation", "simulation not found")
 
     cached = get_analysis(simulation_id)
     if cached is None:
-        # Stream not yet completed — return canned default anyway so the page
-        # has something to show in the demo's hot-loop.
-        cached = {
-            "simulation_id": simulation_id,
-            "ratio_risk": 64,
-            "tone": "caution",
-            "sentiment": {"pos": 92, "mix": 88, "neg": 67},
-            "rewrite": CANNED_REWRITE,
-            "replies": CANNED_REPLIES,
-            "flags": CANNED_FLAGS,
-        }
-        upsert_analysis(simulation_id, cached)
+        raise _bad(409, "analysis_pending", "analysis not yet computed; finish the stream first")
 
-    return AnalyzeResponse(**cached)
+    return AnalyzeResponse(
+        simulation_id=cached.get("simulation_id", simulation_id),
+        tldr=cached["tldr"],
+        suggested_rewrite=SuggestedRewrite(**cached["suggested_rewrite"]),
+        worth_reading=[WorthReadingItem(**w) for w in cached["worth_reading"]],
+    )

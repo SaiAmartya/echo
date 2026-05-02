@@ -83,6 +83,44 @@ def get_simulation(sim_id: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+def get_audience(audience_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name, size, archetypes FROM audiences WHERE id = ?",
+            (audience_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "size": row["size"],
+            "archetypes": json.loads(row["archetypes"]),
+        }
+
+
+def insert_round_event(sim_id: str, round_no: int, payload: dict[str, Any]) -> None:
+    """Persist the cumulative `posts` payload for one round so the SSE stream
+    can be replayed verbatim on reconnect (CONTRACTS.md §3)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO round_events (simulation_id, round, payload) VALUES (?, ?, ?)",
+            (sim_id, round_no, json.dumps(payload)),
+        )
+
+
+def get_round_events(sim_id: str) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT round, payload FROM round_events WHERE simulation_id = ? ORDER BY round ASC, id ASC",
+            (sim_id,),
+        ).fetchall()
+        return [
+            {"round": r["round"], "payload": json.loads(r["payload"])}
+            for r in rows
+        ]
+
+
 def upsert_analysis(sim_id: str, payload: dict[str, Any]) -> None:
     with get_conn() as conn:
         conn.execute(
