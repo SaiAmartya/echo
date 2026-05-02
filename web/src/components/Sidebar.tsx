@@ -89,36 +89,6 @@ export function Sidebar({ active }: { active: SidebarKey }) {
       })}
 
       <div style={{ flex: 1 }} />
-
-      <div
-        style={{
-          padding: 12,
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          background: "var(--surface)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 6,
-        }}
-      >
-        <div
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            color: "var(--fg-3)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-          }}
-        >
-          This month
-        </div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--fg-1)" }}>
-          14 / 25 simulations
-        </div>
-        <div style={{ height: 4, background: "var(--surface-3)", borderRadius: 2, overflow: "hidden" }}>
-          <div style={{ width: "56%", height: "100%", background: "var(--accent-200)" }} />
-        </div>
-      </div>
     </aside>
   );
 }

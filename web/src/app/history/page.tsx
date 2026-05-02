@@ -12,7 +12,6 @@ import { RequireAuth } from "@/components/auth/RequireAuth";
 
 // Static decorative filter strip — counts here are just for v2 polish, not
 // real aggregates. Per Phase E2 spec we keep this static.
-const filters = ["All · 14", "Low risk · 6", "Mild · 5", "High risk · 3"];
 
 function toneToBadge(tone: HistoryTone): { label: string; tone: "positive" | "caution" | "danger" | "neutral" } {
   switch (tone) {
@@ -103,25 +102,6 @@ function HistoryPageInner() {
             {error}
           </div>
         )}
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {filters.map((t, i) => (
-            <span
-              key={t}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 999,
-                fontSize: 12,
-                background: i === 0 ? "var(--surface-2)" : "transparent",
-                color: i === 0 ? "var(--fg-1)" : "var(--fg-3)",
-                border: i === 0 ? "1px solid var(--border-strong)" : "1px solid var(--border)",
-                cursor: "pointer",
-              }}
-            >
-              {t}
-            </span>
-          ))}
-        </div>
 
         {isLoading && (
           <div
