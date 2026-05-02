@@ -35,7 +35,19 @@ const DEFAULT_ROUNDS = 5;
 // animate. Server cadence is ~1.5s/round under Gemini, but we pace defensively
 // in the FE so a fast model (or a future optimization) doesn't collapse the
 // signature visualization into a blink. See debugger commit message for why.
-const MIN_ROUND_VISIBLE_MS = 1200;
+//
+// Q3: bumped 1.2s → 1.8s baseline + jitter so the X-style typing reveal has
+// room to breathe. Per-round gap = 1800ms ± jitter(-300, +600), drawn fresh
+// each drain so the cadence doesn't feel mechanical. Typing duration in
+// TweetCard caps at ~1.2s (≈70% of the gap floor) so each reply finishes
+// before the next card slides in.
+const MIN_ROUND_VISIBLE_MS = 1800;
+const ROUND_JITTER_MIN_MS = -300;
+const ROUND_JITTER_MAX_MS = 600;
+function jitteredGap(): number {
+  const span = ROUND_JITTER_MAX_MS - ROUND_JITTER_MIN_MS;
+  return MIN_ROUND_VISIBLE_MS + ROUND_JITTER_MIN_MS + Math.random() * span;
+}
 // After the report POSTs back 200, wait this long before navigating to /report
 // so the spinner doesn't snap-cut to a dense report page — gives the user a
 // moment of "ok, that's done" before the route flip.
@@ -219,10 +231,10 @@ function SimulatingInner() {
         setPosts(next.posts);
         lastAppliedAtRef.current = Date.now();
         if (queueRef.current.length > 0) {
-          drainTimerRef.current = setTimeout(drain, MIN_ROUND_VISIBLE_MS);
+          drainTimerRef.current = setTimeout(drain, jitteredGap());
         } else if (doneSeenRef.current) {
           // No more inbound work — finish after honoring this round's gap.
-          drainTimerRef.current = setTimeout(finish, MIN_ROUND_VISIBLE_MS);
+          drainTimerRef.current = setTimeout(finish, jitteredGap());
         }
         return;
       }
@@ -235,7 +247,7 @@ function SimulatingInner() {
       const wait =
         lastAppliedAtRef.current === 0
           ? 0                                        // first round paints immediately
-          : Math.max(0, MIN_ROUND_VISIBLE_MS - since);
+          : Math.max(0, jitteredGap() - since);
       drainTimerRef.current = setTimeout(drain, wait);
     };
 

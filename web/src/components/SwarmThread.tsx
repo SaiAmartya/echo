@@ -1,8 +1,12 @@
 "use client";
 
-// SwarmThread — ported from design/echo/project/lib/SwarmThread.jsx
+// SwarmThread — two-column layout: X-style thread (left, 60%) + ambient
+// "room" force-graph (right, 40%, dimmed). The thread is the hero; the room
+// is supporting context. See TweetCard.tsx for the per-post animation logic.
 
+import { useEffect, useState } from "react";
 import type { ServerPost, SimulationMode } from "@/lib/api";
+import { TweetCard } from "./TweetCard";
 
 type Archetype = "skeptic" | "enthusiast" | "curious" | "practitioner" | "pedant" | "lurker";
 type AudienceKind = "target" | "public";
@@ -42,27 +46,10 @@ const SEED_AGENTS: Agent[] = [
 ];
 
 const THREAD_SCRIPT: ThreadEvent[] = [
-  { id: "p1",  round: 1, parent: "seed", agent: "a2",  sentiment:  0.58, text: "finally. weekly memo > all-hands theatre." },
-  { id: "p2",  round: 1, parent: "seed", agent: "a1",  sentiment: -0.12, text: "monthly memos > quarterly OKRs but you'll still need a way to track outcomes. otherwise it's just velocity theater." },
-  { id: "p3",  round: 1, parent: "seed", agent: "a4",  sentiment:  0.42, text: "saved. doing this." },
-  { id: "p4",  round: 1, parent: "seed", agent: "a3",  sentiment:  0.04, text: "this works for product. how does it work for sales?" },
-
-  { id: "p5",  round: 2, parent: "p1",   agent: "a5",  sentiment: -0.34, text: "every team that says \"meetings are theatre\" replaces them with longer slack threads." },
-  { id: "p6",  round: 2, parent: "p2",   agent: "a8",  sentiment: -0.08, text: "agree. \"we'd rather ship\" reads as a vibe, not a system." },
-  { id: "p7",  round: 2, parent: "p4",   agent: "a9",  sentiment:  0.18, text: "we tried this in sales — pipeline reviews stayed live, everything else became a memo. worked." },
-  { id: "p8",  round: 2, parent: "seed", agent: "a6",  sentiment:  0.22, text: "what's the cycle length under the new model? weekly memo + monthly review?" },
-
-  { id: "p9",  round: 3, parent: "p2",   agent: "a11", sentiment: -0.28, text: "+1 to audrey. monthly is just shorter quarters with worse metrics." },
-  { id: "p10", round: 3, parent: "p5",   agent: "a8",  sentiment: -0.18, text: "this. the \"meetings = bad\" framing always undersells the actual cost: alignment debt." },
-  { id: "p11", round: 3, parent: "p1",   agent: "a12", sentiment:  0.52, text: "writing forces sharper thinking. zero notes." },
-  { id: "p12", round: 3, parent: "p7",   agent: "a3",  sentiment:  0.30, text: "interesting. did sales push back at first?" },
-
-  { id: "p13", round: 4, parent: "p2",   agent: "a5",  sentiment: -0.30, text: "thread of skeptics forming here — notion folks, are you reading?" },
-  { id: "p14", round: 4, parent: "p2",   agent: "a7",  sentiment: -0.05, text: "fwiw the absolutist phrasing (\"a tax on focus\") is the part that's drawing fire, not the idea." },
-  { id: "p15", round: 4, parent: "p11",  agent: "a4",  sentiment:  0.40, text: "memos > meetings is the boring right answer." },
-
-  { id: "p16", round: 5, parent: "p2",   agent: "a10", sentiment: -0.22, text: "ratio risk if you don't pre-empt the \"how do you measure\" replies." },
-  { id: "p17", round: 5, parent: "p13",  agent: "a1",  sentiment: -0.20, text: "consensus emerging: change the phrasing, keep the substance." },
+  { id: "p1", round: 1, parent: "seed", agent: "a2", sentiment:  0.58, text: "finally. weekly memo > all-hands theatre." },
+  { id: "p2", round: 1, parent: "seed", agent: "a1", sentiment: -0.12, text: "monthly memos > quarterly OKRs but you'll still need a way to track outcomes. otherwise it's just velocity theater." },
+  { id: "p3", round: 1, parent: "seed", agent: "a4", sentiment:  0.42, text: "saved. doing this." },
+  { id: "p4", round: 1, parent: "seed", agent: "a3", sentiment:  0.04, text: "this works for product. how does it work for sales?" },
 ];
 
 const CLUSTER_CENTERS: Record<Archetype, { x: number; y: number; color: string }> = {
@@ -74,27 +61,27 @@ const CLUSTER_CENTERS: Record<Archetype, { x: number; y: number; color: string }
   skeptic:      { x: -100, y:  35, color: "#f06c5a" },
 };
 
-function getInitials(name: string) {
-  return name.split(" ").map((s) => s[0]).slice(0, 2).join("").toUpperCase();
-}
-function toneColor(s: number) {
+function toneColor(s: number): string {
   return s > 0.15 ? "#7dd49a" : s < -0.15 ? "#f06c5a" : "#b8b8c0";
 }
 
-function agentPoint(agentId: string, archetype: Archetype) {
+// Small helper: round any svg coord to 2 decimals so SSR (Node V8) and
+// hydration (browser V8) emit the same string. Some Math.cos/sin chains
+// previously diverged at the 14th decimal place and tripped React's
+// hydration mismatch warning on cx attributes.
+function r2(n: number): string {
+  return n.toFixed(2);
+}
+
+function agentPoint(agentId: string, archetype: Archetype): { x: number; y: number; color: string } {
   const center = CLUSTER_CENTERS[archetype] || CLUSTER_CENTERS.lurker;
   let h = 0;
-  for (let i = 0; i < agentId.length; i++) h = (h * 31 + agentId.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < agentId.length; i += 1) h = (h * 31 + agentId.charCodeAt(i)) >>> 0;
   const a = ((h % 1000) / 1000) * Math.PI * 2;
   const r = 14 + (((h >> 10) % 1000) / 1000) * 22;
   return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r, color: center.color };
 }
 
-/**
- * Normalize props into the internal (ThreadEvent[], Agent[]) representation.
- * - Live mode: `posts` is a ServerPost[] from /simulate/stream.
- * - Canned mode: undefined, fall back to THREAD_SCRIPT + SEED_AGENTS.
- */
 function normalize(
   posts: ServerPost[] | undefined,
   currentRound: number,
@@ -107,12 +94,8 @@ function normalize(
   }
   const filtered = posts.filter((p) => p.round <= currentRound);
   const events: ThreadEvent[] = filtered.map((p) => ({
-    id: p.id,
-    round: p.round,
-    parent: p.parent,
-    agent: p.agent.id,
-    sentiment: p.sentiment,
-    text: p.text,
+    id: p.id, round: p.round, parent: p.parent, agent: p.agent.id,
+    sentiment: p.sentiment, text: p.text,
   }));
   const seen = new Set<string>();
   const agents: Agent[] = [];
@@ -120,11 +103,8 @@ function normalize(
     if (seen.has(p.agent.id)) continue;
     seen.add(p.agent.id);
     agents.push({
-      id: p.agent.id,
-      name: p.agent.name,
-      handle: p.agent.handle,
-      archetype: p.agent.archetype,
-      audience: p.agent.audience,
+      id: p.agent.id, name: p.agent.name, handle: p.agent.handle,
+      archetype: p.agent.archetype, audience: p.agent.audience,
     });
   }
   return { events, agents };
@@ -167,9 +147,7 @@ export function SwarmThread({
     .filter((e): e is Edge => e !== null);
 
   const childCounts: Record<string, number> = {};
-  events.forEach((p) => {
-    childCounts[p.parent] = (childCounts[p.parent] || 0) + 1;
-  });
+  events.forEach((p) => { childCounts[p.parent] = (childCounts[p.parent] || 0) + 1; });
   const dogpileIds = new Set(
     Object.entries(childCounts)
       .filter(([k, v]) => k !== "seed" && v >= 2)
@@ -177,7 +155,8 @@ export function SwarmThread({
   );
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1.05fr 1fr", gap: 16, height: "100%" }}>
+    // 60/40 split favoring the thread — the room is now supporting context.
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) minmax(0, 1fr)", gap: 16, height: "100%" }}>
       <ThreadColumn seedDraft={seedDraft} posts={events} lookup={lookup} mode={mode} />
       <SwarmMap posts={events} edges={edges} dogpileIds={dogpileIds} running={running} agents={agents} />
     </div>
@@ -195,16 +174,29 @@ function ThreadColumn({
   lookup: (id: string) => Agent | undefined;
   mode?: SimulationMode;
 }) {
-  const memo: Record<string, number> = {};
-  const depthOf = (p: ThreadEvent): number => {
-    if (memo[p.id] != null) return memo[p.id];
-    if (p.parent === "seed") return (memo[p.id] = 0);
-    const parent = posts.find((x) => x.id === p.parent);
-    if (!parent) return (memo[p.id] = 0);
-    return (memo[p.id] = depthOf(parent) + 1);
+  // Shared "now" tick (5s cadence) so all TweetCards refresh their relative
+  // timestamps in lockstep without each running its own setInterval.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 5000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // Build parent-handle lookup so each TweetCard can render "Replying to @x".
+  const parentHandleOf = (parentId: string): string | undefined => {
+    if (parentId === "seed") return undefined;
+    const parentPost = posts.find((p) => p.id === parentId);
+    if (!parentPost) return undefined;
+    const ag = lookup(parentPost.agent);
+    return ag?.handle;
   };
-  const enriched = posts.map((p) => ({ ...p, depth: Math.min(depthOf(p), 3) }));
-  const lastRound = Math.max(...enriched.map((p) => p.round), 0);
+
+  // Perf scope-down per task brief: only the most recent ~10 posts get the
+  // animated +1 like floaters and grow-in counts. Older posts show their
+  // final like count statically. Caps simultaneous animations regardless of
+  // total post count (rounds=15 ≈ 90 posts).
+  const LIVE_WINDOW = 10;
+  const liveCutoff = Math.max(0, posts.length - LIVE_WINDOW);
 
   return (
     <div
@@ -215,100 +207,74 @@ function ThreadColumn({
         padding: 16,
         display: "flex",
         flexDirection: "column",
-        gap: 10,
+        gap: 12,
         overflow: "hidden",
       }}
     >
       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <span style={{ fontSize: 14, color: "var(--fg-1)", fontWeight: 500 }}>The thread</span>
+        <span style={{ fontSize: 14, color: "var(--fg-1)", fontWeight: 600 }}>The thread</span>
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>
-          {posts.length} replies
+          {posts.length} {posts.length === 1 ? "reply" : "replies"}
         </span>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          paddingRight: 4,
+        }}
+      >
+        {/* Seed post — kept simple so the user's draft visually anchors the thread. */}
         <div
           style={{
             background: "var(--bg-deep)",
             border: "1px solid var(--border)",
             borderLeft: "2px solid var(--accent-200)",
-            borderRadius: 10,
-            padding: 12,
+            borderRadius: 12,
+            padding: "12px 14px",
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
             {mode === "hypothetical" ? (
-              <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>the scenario</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-1)" }}>the scenario</span>
             ) : (
               <>
-                <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>your post</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-1)" }}>your post</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>@notion</span>
               </>
             )}
           </div>
-          <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.45 }}>{seedDraft}</div>
+          <div style={{ fontSize: 14, color: "var(--fg-1)", lineHeight: 1.5 }}>{seedDraft}</div>
         </div>
 
-        {enriched.map((p) => {
+        {posts.map((p, i) => {
           const ag = lookup(p.agent);
           if (!ag) return null;
-          const isLatest = p.round === lastRound;
+          const liveAnimations = i >= liveCutoff;
           return (
-            <div
+            <TweetCard
               key={p.id}
-              style={{
-                marginLeft: p.depth * 18,
-                borderLeft: p.depth > 0 ? "1px solid var(--border)" : "none",
-                paddingLeft: p.depth > 0 ? 10 : 0,
+              post={{
+                id: p.id,
+                parent: p.parent,
+                round: p.round,
+                text: p.text,
+                sentiment: p.sentiment,
               }}
-            >
-              <div
-                style={{
-                  background: isLatest ? "var(--surface-2)" : "transparent",
-                  border: "1px solid " + (isLatest ? "var(--border-strong)" : "var(--border)"),
-                  borderRadius: 10,
-                  padding: "10px 12px",
-                  display: "flex",
-                  gap: 10,
-                  transition: "background 200ms",
-                }}
-              >
-                <div
-                  style={{
-                    width: 24,
-                    height: 24,
-                    borderRadius: 999,
-                    flexShrink: 0,
-                    background: "var(--surface-3)",
-                    border: "1px solid var(--border)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 10,
-                    color: "var(--fg-2)",
-                  }}
-                >
-                  {getInitials(ag.name)}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                    <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>{ag.name}</span>
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>{ag.handle}</span>
-                    <span
-                      style={{
-                        marginLeft: "auto",
-                        width: 6,
-                        height: 6,
-                        borderRadius: 999,
-                        background: toneColor(p.sentiment),
-                      }}
-                    />
-                  </div>
-                  <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.45, marginTop: 3 }}>{p.text}</div>
-                </div>
-              </div>
-            </div>
+              agent={{
+                id: ag.id,
+                name: ag.name,
+                handle: ag.handle,
+                archetype: ag.archetype,
+              }}
+              parentHandle={parentHandleOf(p.parent)}
+              now={now}
+              liveAnimations={liveAnimations}
+            />
           );
         })}
       </div>
@@ -342,20 +308,23 @@ function SwarmMap({
     .filter((v): v is { x: number; y: number; color: string } => Boolean(v));
 
   return (
+    // De-emphasized per Q3 design priority 5: lower overall opacity, smaller
+    // dots, dimmer connecting lines. Thread is the hero now.
     <div
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: 12,
-        padding: 16,
+        padding: 14,
         display: "flex",
         flexDirection: "column",
-        gap: 12,
+        gap: 10,
         overflow: "hidden",
+        opacity: 0.78,
       }}
     >
       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <span style={{ fontSize: 14, color: "var(--fg-1)", fontWeight: 500 }}>The room</span>
+        <span style={{ fontSize: 13, color: "var(--fg-2)", fontWeight: 500 }}>The room</span>
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>
           {activeAgents.size} / 200 engaged
         </span>
@@ -366,11 +335,11 @@ function SwarmMap({
           flex: 1,
           position: "relative",
           background:
-            "radial-gradient(circle at center, rgba(212,255,92,0.04) 0%, transparent 65%), var(--bg-deep)",
+            "radial-gradient(circle at center, rgba(212,255,92,0.03) 0%, transparent 65%), var(--bg-deep)",
           border: "1px solid var(--border)",
           borderRadius: 10,
           overflow: "hidden",
-          minHeight: 220,
+          minHeight: 200,
         }}
       >
         <svg
@@ -380,19 +349,19 @@ function SwarmMap({
           style={{ position: "absolute", inset: 0 }}
         >
           {Object.entries(CLUSTER_CENTERS).map(([k, c]) => (
-            <circle key={k} cx={c.x} cy={c.y} r={48} fill={c.color} opacity={0.05} />
+            <circle key={k} cx={r2(c.x)} cy={r2(c.y)} r={48} fill={c.color} opacity={0.04} />
           ))}
 
           {edges.map((e, i) => (
             <line
               key={i}
-              x1={e.from.x}
-              y1={e.from.y}
-              x2={e.to.x}
-              y2={e.to.y}
+              x1={r2(e.from.x)}
+              y1={r2(e.from.y)}
+              x2={r2(e.to.x)}
+              y2={r2(e.to.y)}
               stroke={toneColor(e.sentiment)}
-              strokeWidth={0.6}
-              opacity={0.45}
+              strokeWidth={0.5}
+              opacity={0.32}
             />
           ))}
 
@@ -402,11 +371,11 @@ function SwarmMap({
             return (
               <g key={a.id}>
                 <circle
-                  cx={p.x}
-                  cy={p.y}
-                  r={active ? 3 : 2}
+                  cx={r2(p.x)}
+                  cy={r2(p.y)}
+                  r={active ? 2.4 : 1.6}
                   fill={active ? p.color : "#2e2e34"}
-                  opacity={active ? 0.95 : 0.5}
+                  opacity={active ? 0.85 : 0.4}
                   style={{
                     animationName: active && running ? "echo-pulse" : "none",
                     animationDuration: "1.6s",
@@ -423,13 +392,13 @@ function SwarmMap({
             const radius = 20 + (idx % 9) * 12;
             const x = Math.cos(angle) * radius * 1.3;
             const y = Math.sin(angle) * radius * 1.0;
-            return <circle key={`f${idx}`} cx={x} cy={y} r={1.2} fill="#43434b" opacity={0.55} />;
+            return <circle key={`f${idx}`} cx={r2(x)} cy={r2(y)} r={1} fill="#43434b" opacity={0.4} />;
           })}
 
-          <circle cx={0} cy={0} r={6} fill="rgba(11,11,12,0.95)" stroke="var(--accent-200)" strokeWidth={1} />
+          <circle cx="0" cy="0" r={6} fill="rgba(11,11,12,0.95)" stroke="var(--accent-200)" strokeWidth={1} />
           <circle
-            cx={0}
-            cy={0}
+            cx="0"
+            cy="0"
             r={2}
             fill="var(--accent-200)"
             style={{
@@ -443,20 +412,20 @@ function SwarmMap({
           {dogpilePositions.map((p, i) => (
             <circle
               key={`dp${i}`}
-              cx={p.x}
-              cy={p.y}
-              r={9}
+              cx={r2(p.x)}
+              cy={r2(p.y)}
+              r={8}
               fill="none"
               stroke="var(--accent-200)"
-              strokeWidth={1}
-              opacity={0.7}
+              strokeWidth={0.8}
+              opacity={0.6}
               style={{
                 animationName: "echo-ripple",
                 animationDuration: "2.4s",
                 animationTimingFunction: "cubic-bezier(0.2, 0.8, 0.2, 1)",
                 animationIterationCount: "infinite",
-                animationDelay: `${i * 0.3}s`,
-                transformOrigin: `${p.x}px ${p.y}px`,
+                animationDelay: `${(i * 0.3).toFixed(2)}s`,
+                transformOrigin: `${r2(p.x)}px ${r2(p.y)}px`,
               }}
             />
           ))}
