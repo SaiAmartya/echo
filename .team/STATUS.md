@@ -4,17 +4,17 @@ Updated by each agent after every meaningful task. One line per agent.
 
 | Agent | Status | Last update | Current task |
 |---|---|---|---|
-| lead (claude-opus-4-7) | 🟢 active | 2026-05-01 21:35 | Phase A spawned; awaiting researcher |
-| researcher (opus) | 🟡 working | 2026-05-01 21:35 | Phase A — SWARM-DESIGN.md + CONTRACTS.md |
-| backend-engineer | ⚪ pending | — | — |
-| frontend-engineer | ⚪ pending | — | — |
+| lead (claude-opus-4-7) | 🟢 active | 2026-05-01 21:50 | Phase B+C spawned in parallel |
+| researcher (opus) | ✅ done | 2026-05-01 21:48 | Phase A complete — design locked |
+| backend-engineer (opus) | 🟡 working | 2026-05-01 21:50 | Phase B — Gemini-backed swarm engine |
+| frontend-engineer (opus) | 🟡 working | 2026-05-01 21:50 | Phase C — wire pages to real backend |
 | integrator | ⚪ pending | — | — |
 | e2e-tester | ⚪ pending | — | — |
 | debugger | 💤 standby | — | spawned on demand |
 
 ## Phase tracker
 
-- [ ] **A** — Swarm engine research (`docs/SWARM-DESIGN.md`)
+- [x] **A** — Swarm engine research (`docs/SWARM-DESIGN.md`, `.team/CONTRACTS.md` LOCKED v1)
 - [ ] **B** — Real Gemini-backed backend
 - [ ] **C** — Frontend wired to real backend
 - [ ] **D** — Integration + E2E green
