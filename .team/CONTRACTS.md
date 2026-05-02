@@ -491,3 +491,45 @@ Request `rounds` field range changes from `[3, 6]` to `[5, 15]`.
 - Migration check: confirm no production rows depend on rounds < 5 before deploy.
   Hackathon-stage: pre-Q1 sims with rounds<5 remain in DB; only NEW sims are constrained.
 - Default unchanged (FE picks its own default; backend just enforces range).
+
+
+---
+
+## v6 (LOCKED — 2026-05-02): real engagement signal on posts
+
+### § 21. SSE `event: round` — Post shape additive update
+
+Each post in `posts[]` gains two new fields:
+
+```ts
+{
+  // ... v1 §3 fields unchanged ...
+  "like_count": number,    // NEW — int ≥ 0; deterministic per (sim_id, post_id), monotonically non-decreasing across rounds
+  "reply_count": number    // NEW — int ≥ 0; computed as |{p in posts | p.parent == this.id}| at SSE emit time
+}
+```
+
+Both fields default to `0` if absent (backward-compat for v1-v5 callers / replays of pre-v6 sims).
+
+### § 22. Engagement semantics (server-side, FE consumes)
+
+- **`like_count` is computed deterministically**, not via LLM. Algorithm lives in `swarm.py`. Inputs: post archetype, post sentiment, post round, current round (for visibility decay), audience archetype mix. Same `(sim_id, post_id, round)` tuple → same `like_count`. **This guarantees replay parity** (L22).
+- **`like_count` is monotonically non-decreasing.** A post emitted in round N may have `like_count = 5` in round N's SSE event, then `like_count = 8` in round N+1's SSE event (because more rounds = more "scrolling personas" who saw and liked it). FE must accept the latest value per post-id.
+- **`reply_count` is recomputed on every SSE emit** as a function of cumulative posts. FE accepts the latest value.
+- Wire size impact: 2 small ints per post × ~90 posts at rounds=15 = ~1.5KB total. Negligible.
+
+### § 23. Smarter reply-targeting in `_build_user_prompt`
+
+The `prior_top` block (formerly "loudest 5 by id") now ranks prior posts by `engagement_score = like_count + reply_count * 2`, descending. The top 4 by score plus 1-2 random low-engagement posts are surfaced to each per-round-per-archetype prompt. This is the "scroll then engage" model: model sees trending + discovery, picks what to react to.
+
+This is a **prompt change**, not a wire change. FE/BE wire shapes unchanged.
+
+### § 24. Backward compatibility
+
+- v1-v5 wire shapes preserved.
+- Replays of pre-v6 simulations: backend re-derives `like_count`/`reply_count` from the deterministic algorithm at replay time (or returns 0 if the algorithm wasn't yet enabled — FE must tolerate 0).
+- Existing FE consuming v1 §3 posts will silently ignore the new fields. New FE relies on them for engagement-DESC sort + heart-pop animations.
+
+---
+
+**v6 LOCKED — 2026-05-02.** Implementations: backend in `swarm.py` engagement algorithm; frontend in `SwarmThread.tsx` indented tree + engagement re-sort.
