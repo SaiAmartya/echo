@@ -25,6 +25,8 @@ Updated by each agent after every meaningful task. One line per agent.
 | backend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 06:08 | Q1-BE done (commit c2d73c2) — rounds [3,6]→[5,15], MAX_LLM_CALLS default 40→100, RULES.md R2 + CONTRACTS v5 §20 LOCKED. Full rounds=15 sim + report verified (340 posts, verdict rethink). api/.env had hardcoded =40 override, bumped locally to 100; flagged in handoff. Despawned. |
 | frontend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:18 | Q1-FE+Q2 done (commit 7bacfb0) — rounds dropdown 5-15 next to mode chip, sessionStorage persistence (with hydrate-race bug fix as bonus), Q2 report-ready gate with retry-on-failure. 9/9 Chrome-MCP E2E (skipped destructive test for safety). Despawned. |
 | frontend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 06:30 | Q3 done (commit 4b20857) — X-style tweet cards, word-by-word typing reveal, organic archetype-weighted likes, 1.8s ± jitter pacing, room graph dimmed to 60/40, hydration warning fixed, mulberry32-seeded PRNG for replay parity. 76.8 avg fps at rounds=15 (well above 50 gate). GIF captured to ~/Downloads/q3_thread_reveal.gif. Despawned. |
+| backend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:55 | R1 done (commit 13bb725) — engagement engine: 6×6 archetype affinity matrix, deterministic mulberry-equivalent likes seeded by (sim_id, post_id, round), smarter prior_top by engagement DESC + long-tail discovery. 7/7 verifications green; viral-take-attracts-dunks pattern surfaced (e.g. enthusiast p5 score=447 attracted skeptic dunks in r4/r5). Zero new LLM calls — budget unchanged. Despawned. |
+| frontend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 07:00 | R2 done (commit 37335b0) — parent-child tree rendering with level-1 indent + vertical thread line; FLIP-based engagement-DESC re-sort animation (600ms cubic-bezier, "thread settles" vibe) on report-pending phase; TweetCard drops cosmetic mulberry32, consumes wire like_count/reply_count with growth-detected heart-pop. 8/8 Chrome MCP verifications, GIF captured at ~/Downloads/r2_engagement_sort.gif (2.7MB, 14s). 213 posts initial render in 265ms. Despawned. |
 
 ## Phase tracker
 
@@ -47,6 +49,10 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **Q1-BE** — rounds [3,6]→[5,15], MAX_LLM_CALLS 40→100, RULES.md R2 + CONTRACTS v5 §20 (commit c2d73c2, pushed)
   - [x] **Q1-FE+Q2** — rounds dropdown next to mode chip + report-ready redirect gate + hydrate-race bug fix (commit 7bacfb0, pushed)
   - [x] **Q3** — X-style thread reveal: tweet cards, typing animation, organic likes, paced reveal, hydration warning fix (commit 4b20857, pushed). 76.8 avg fps at rounds=15.
+- [x] **R (engagement signal batch)** — Real likes + indented threads + engagement-DESC sort.
+  - [x] **CONTRACTS v6 §§21-24** locked (commit f4d0ce3, pushed) — like_count + reply_count on Post; deterministic per (sim_id, post_id, round); smarter prior_top by engagement.
+  - [x] **R1** — engagement engine in swarm.py (commit 13bb725, pushed). 7/7 verifications.
+  - [x] **R2** — indented thread tree + FLIP engagement-DESC re-sort (commit 37335b0, pushed). 8/8 Chrome MCP verifications + GIF.
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
