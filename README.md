@@ -37,6 +37,26 @@ Open http://localhost:3000.
 
 The frontend's `next.config.mjs` proxies `/api/*` → `NEXT_PUBLIC_API_BASE` (defaults to `http://127.0.0.1:8000`), so you don't need to think about CORS during dev.
 
+### Terminal 3 (optional) — TUI control plane
+
+If you want to drive the swarm from the terminal instead of the browser — useful for fast iteration on prompts, demoing without a screen share, or when the frontend is mid-edit — there's a Textual TUI at `api/tui.py` that talks straight to the engine.
+
+```bash
+.venv/bin/python -m api.tui
+```
+
+(Run from the repo root. The first time, set up the venv: `python3 -m venv .venv && .venv/bin/pip install -r api/requirements.txt`. The TUI reads your existing `api/.env` for `GEMINI_API_KEY`.)
+
+**Flow** — three screens mirror the web app:
+
+1. **Compose** — paste a draft, pick rounds (1–20), pick an audience preset (`none`, `notion`, `yc-startup`, `creator`). `Ctrl+R` to run.
+2. **Simulate** — left pane streams replies as they arrive, color-coded by archetype with per-reply sentiment. Right pane is a live "the room" panel with archetype histograms, target/public split, mean sentiment, and a progress bar. `s` to stop, `n` to start over.
+3. **Report** — once rounds finish, press `a` to see the headline, suggested rewrite, and three worth-reading reply chains.
+
+**Keys** — `q` quit · `n` new · `s` stop · `a` analysis · `Ctrl+R` run · `Ctrl+C` hard quit.
+
+The TUI runs the same `api/engine/` code path the FastAPI backend will use in Step 2 — Gemini 2.5 Flash-Lite for round reactions, Gemini 3 Flash Preview for final analysis. No other LLM providers are required.
+
 ## Step 1 happy path
 
 1. Land on `/` (Landing).
@@ -76,6 +96,8 @@ Holding off on the install means Step 1 can be tested without anyone having to r
 | `api/app/main.py` | FastAPI entrypoint, four stub endpoints, SSE round emitter |
 | `api/app/db.py` | SQLite helpers (`audiences`, `simulations`, `round_events`, `analyses`) |
 | `api/app/canned.py` | The hard-coded responses Step 1 returns |
+| `api/tui.py` | Textual TUI — terminal control plane that drives the swarm engine directly |
+| `api/engine/` | Standalone swarm engine (archetypes, prompts, round loop, Gemini calls) used by the TUI |
 
 ## What's intentionally *not* in Step 1
 

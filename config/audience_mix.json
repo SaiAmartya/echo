@@ -1,0 +1,21 @@
+{
+  "total_personas": 200,
+  "public_share": 0.70,
+  "target_share": 0.30,
+  "public_mix": {
+    "enthusiast": 0.15,
+    "practitioner": 0.10,
+    "curious": 0.30,
+    "lurker": 0.25,
+    "pedant": 0.10,
+    "skeptic": 0.10
+  },
+  "target_mix": {
+    "enthusiast": 0.40,
+    "practitioner": 0.30,
+    "curious": 0.15,
+    "lurker": 0.05,
+    "pedant": 0.05,
+    "skeptic": 0.05
+  }
+}
