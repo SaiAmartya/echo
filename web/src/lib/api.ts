@@ -98,6 +98,17 @@ export interface StreamErrorEvent {
   code: string;
 }
 
+// v8 §31 — SSE `event: grounding` payload (additive). Only emitted when
+// /simulate/start was called with `web_grounding=true`. Sequence is exactly
+// one "searching" followed by exactly one of {done, skipped, failed}, then
+// the regular `event: round` stream resumes. Old FE that doesn't bind a
+// listener silently ignores these events. See CONTRACTS.md §§31-34.
+export type GroundingEvent =
+  | { status: "searching" }
+  | { status: "done"; chars_added: number }
+  | { status: "skipped"; reason: string }
+  | { status: "failed"; reason: string };
+
 export interface SuggestedRewrite {
   original: string;
   rewrite: string;
@@ -244,7 +255,16 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError({ code, message, status: res.status });
 }
 
+// Local-dev bypass — mirrors AuthProvider's NEXT_PUBLIC_DISABLE_AUTH=1 path.
+// Without this, api.ts asks Firebase directly (no signed-in user in bypass
+// mode) and sends no Authorization header, which the backend rejects with
+// 401 before its FIREBASE_AUTH_DISABLED short-circuit can run. Token literal
+// matches the stub in AuthProvider.tsx so rotation stays in one place.
+const DEV_BYPASS_TOKEN = "dev-local-token";
+const AUTH_DISABLED = process.env.NEXT_PUBLIC_DISABLE_AUTH === "1";
+
 async function authHeaders(): Promise<Record<string, string>> {
+  if (AUTH_DISABLED) return { authorization: `Bearer ${DEV_BYPASS_TOKEN}` };
   const token = await getCurrentIdToken();
   return token ? { authorization: `Bearer ${token}` } : {};
 }
@@ -278,9 +298,13 @@ export function simulateStart(
 }
 
 export async function simulateStreamUrl(simulationId: string): Promise<string> {
-  const token = await getCurrentIdToken();
   const params = new URLSearchParams({ simulation_id: simulationId });
-  if (token) params.set("token", token);
+  if (AUTH_DISABLED) {
+    params.set("token", DEV_BYPASS_TOKEN);
+  } else {
+    const token = await getCurrentIdToken();
+    if (token) params.set("token", token);
+  }
   return `/api/simulate/stream?${params.toString()}`;
 }
 

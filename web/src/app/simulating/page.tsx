@@ -15,6 +15,7 @@ import type { SortMode } from "@/lib/tree-builder";
 import {
   api,
   ApiError,
+  type GroundingEvent,
   type ReportResponse,
   type RoundEvent,
   type ServerPost,
@@ -83,6 +84,83 @@ function errorCopy(code: string): string {
   }
 }
 
+// Z8 — subtle "searching the web for context…" banner shown above the
+// thread while the v8 grounding pre-call runs. Renders one of four states
+// per CONTRACTS.md §31. Disappears as soon as the first round event lands
+// (handled in the SSE handler) or after a short timeout for terminal
+// states. Pure CSS animations — no extra deps.
+function GroundingBanner({ state }: { state: GroundingEvent }) {
+  let icon: string;
+  let label: string;
+  let iconColor: string;
+
+  switch (state.status) {
+    case "searching":
+      icon = "🔍";
+      label = "Searching the web for context…";
+      iconColor = "var(--accent-300)";
+      break;
+    case "done":
+      icon = "✓";
+      label = `Context: ${state.chars_added} chars added`;
+      iconColor = "var(--accent-300)";
+      break;
+    case "skipped":
+      icon = "ℹ";
+      label = "No web context relevant";
+      iconColor = "var(--fg-3)";
+      break;
+    case "failed":
+      icon = "⚠";
+      label = "Web grounding failed — proceeding without context";
+      iconColor = "var(--warning, #f0b85a)";
+      break;
+  }
+
+  return (
+    <div style={{ display: "flex", justifyContent: "center" }}>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          minWidth: 360,
+          maxWidth: 420,
+          padding: "8px 14px",
+          background: "var(--surface-2)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
+          fontSize: 12,
+          color: "var(--fg-2)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+          animation: "echo-grounding-fade-in 200ms ease-out both",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            color: iconColor,
+            fontSize: 13,
+            lineHeight: 1,
+            ...(state.status === "searching"
+              ? {
+                  animation:
+                    "echo-grounding-pulse 1.6s ease-in-out infinite",
+                }
+              : {}),
+          }}
+        >
+          {icon}
+        </span>
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
+
 function SimulatingInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -101,6 +179,10 @@ function SimulatingInner() {
   // Default "business" preserves @notion attribution for legacy/unset cases.
   // Live hydrates from sessionStorage; replay overwrites from server payload.
   const [mode, setMode] = useState<SimulationMode>("business");
+  // Z8 — web-grounding loading-state banner. Null = no banner.
+  const [groundingState, setGroundingState] = useState<GroundingEvent | null>(
+    null,
+  );
   // R2 — top-level thread ordering. Live starts arrival; replay starts
   // engagement since the final state is already known.
   const [sortMode, setSortMode] = useState<SortMode>(
@@ -280,8 +362,38 @@ function SimulatingInner() {
         const data = JSON.parse(ev.data) as RoundEvent;
         queueRef.current.push(data);
         scheduleDrain();
+        // Z8: round events supersede the grounding banner regardless of its
+        // current status — the swarm has started and the user's eyes belong
+        // on the thread now. Auto-clear timer for terminal grounding states
+        // is a fallback in case round 1 takes longer than expected.
+        setGroundingState(null);
       } catch {
         // ignore malformed payload — server will close the stream if it's bad
+      }
+    };
+
+    // Z8 §31-34: subtle banner during the web-grounding pre-call window so
+    // users know the ~22s gap before round 1 isn't a hang. Old sims and
+    // ungrounded sims simply never emit this event.
+    const onGrounding = (ev: MessageEvent<string>) => {
+      try {
+        const data = JSON.parse(ev.data) as GroundingEvent;
+        setGroundingState(data);
+        if (data.status !== "searching") {
+          const lifetime =
+            data.status === "done"
+              ? 1500
+              : data.status === "skipped"
+                ? 2000
+                : 3000;
+          setTimeout(
+            () =>
+              setGroundingState((cur) => (cur === data ? null : cur)),
+            lifetime,
+          );
+        }
+      } catch {
+        // ignore malformed payload
       }
     };
 
@@ -327,6 +439,7 @@ function SimulatingInner() {
       es = new EventSource(url);
       sourceRef.current = es;
       es.addEventListener("round", onRound as EventListener);
+      es.addEventListener("grounding", onGrounding as EventListener);
       es.addEventListener("done", onDone as EventListener);
       es.addEventListener("error", onErrorEvent as EventListener);
       es.onerror = onConnectionError;
@@ -457,6 +570,7 @@ function SimulatingInner() {
             </Button>
           </div>
         )}
+        {groundingState && <GroundingBanner state={groundingState} />}
         <div style={{ flex: 1, minHeight: 0 }}>
           <SwarmThread
             currentRound={round}

@@ -162,6 +162,24 @@ html, body {
   100% { transform: scale(1); }
 }
 
+/* Z8 — gentle opacity-only pulse for the web-grounding banner icon while
+   status="searching". Distinct from echo-pulse (which scales) so the icon
+   stays visually still. */
+@keyframes echo-grounding-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+@keyframes echo-grounding-fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes echo-grounding-fade-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-2px); }
+}
+
 .echo-tweet {
   position: relative;
   border: 1px solid var(--border);
