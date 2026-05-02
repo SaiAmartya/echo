@@ -19,8 +19,10 @@ HARD CONSTRAINTS (per docs/SWARM-DESIGN.md + .team/CONTRACTS.md):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -48,7 +50,8 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 # Verified `gemini-3-flash-preview` via Context7 + ai.google.dev/gemini-api/docs/gemini-3
 # (2026-05-02): single model id, thinking enabled via `thinking_config={"thinking_level":...}`.
 GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-preview")
-MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "40"))
+# Q1 (2026-05-02): rounds=15 needs 6 archetypes × 15 + 1 analysis + 1 report = 92 calls.
+MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "100"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
 
@@ -72,60 +75,384 @@ ARCHETYPES: tuple[str, ...] = (
 )
 
 
+# ----------------------------------------------------- v6 engagement engine
+# v6 (CONTRACTS §§21-24, 2026-05-02): real engagement signal on posts.
+# Likes are computed deterministically (NO new LLM calls) so the per-sim
+# budget stays at ≤100. Same (sim_id, post_id, round) tuple → same
+# like_count, every replay (L22 — deterministic PRNG seeded by stable id
+# preserves replay parity).
+#
+# Affinity matrix — rows = scroller archetype (the persona deciding whether
+# to like), cols = post author archetype. Values 0..1 are "tendency to like
+# a post by that archetype". Calibrated for social-media plausibility:
+#   - enthusiasts are the like-button users — they boost everyone, esp. own.
+#   - skeptics rarely like; when they do, it's other skeptics (validation)
+#     or pedants (precision they respect).
+#   - lurkers are mostly receptive; mild boost on enthusiast vibes (energy).
+#   - pedants almost never like — they correct, not validate.
+#   - practitioners reward other practitioners (peer recognition) and
+#     pedants (precision).
+#   - curious is moderate across the board (scrolling-engaged but not fan).
+_ARCHETYPE_AFFINITY: dict[str, dict[str, float]] = {
+    "skeptic":      {"skeptic": 0.45, "enthusiast": 0.15, "curious": 0.25, "practitioner": 0.30, "pedant": 0.40, "lurker": 0.20},
+    "enthusiast":   {"skeptic": 0.20, "enthusiast": 0.60, "curious": 0.40, "practitioner": 0.35, "pedant": 0.15, "lurker": 0.50},
+    "curious":      {"skeptic": 0.30, "enthusiast": 0.40, "curious": 0.40, "practitioner": 0.40, "pedant": 0.30, "lurker": 0.30},
+    "practitioner": {"skeptic": 0.25, "enthusiast": 0.30, "curious": 0.30, "practitioner": 0.55, "pedant": 0.40, "lurker": 0.25},
+    "pedant":       {"skeptic": 0.15, "enthusiast": 0.10, "curious": 0.15, "practitioner": 0.20, "pedant": 0.20, "lurker": 0.10},
+    "lurker":       {"skeptic": 0.35, "enthusiast": 0.50, "curious": 0.40, "practitioner": 0.40, "pedant": 0.35, "lurker": 0.35},
+}
+
+
+# T1 (2026-05-02): minor divisive-content bias dials. Module-top so the lead
+# can tune post-QA without function-body surgery. Both tweaks are deterministic
+# (pure functions of existing post sentiments / ids) — no new RNG, replay
+# parity preserved (L22).
+#
+# - _SENT_RESONANCE_PEAK: |sentiment| at which the bell curve in
+#   _sentiment_resonance maxes out. Shifted from the original 0.7 to 0.8 so
+#   high-magnitude takes (|s|>=0.7) get more lift than bland-but-positive
+#   ones; tepid (|s|≈0) is essentially unchanged. resonance(1.0) lifts from
+#   ~0.82 → ~0.91 — saturating-extreme posts stop underperforming.
+# - _CONTROVERSY_BONUS_MAX: ceiling of the post-pass multiplier applied in
+#   attach_engagement to posts whose direct replies disagree (opposite
+#   sentiment sign). 0.15 = up to +15% for 100%-opposite-sign children;
+#   scaled by fraction so 50/50 → +7.5%, 0/all-same → +0%.
+_SENT_RESONANCE_PEAK = 0.8
+_CONTROVERSY_BONUS_MAX = 0.15
+
+
+def _stable_seed(*parts: str) -> int:
+    """Deterministic 32-bit seed from string parts.
+
+    Uses hashlib.md5 (process-stable) instead of Python's hash() because
+    hash() is PYTHONHASHSEED-salted by default in CPython 3.x — replays
+    across process restarts would diverge. md5 is sufficient for jitter
+    seeding (we are not using it as a security primitive).
+    """
+    digest = hashlib.md5(":".join(parts).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _visibility_factor(current_round: int, post_round: int) -> float:
+    """Recency decay — post seen most when fresh, less in later rounds."""
+    delta = current_round - post_round
+    if delta <= 0:
+        return 1.0
+    if delta == 1:
+        return 0.5
+    if delta == 2:
+        return 0.25
+    return 0.10
+
+
+def _sentiment_resonance(sentiment: float) -> float:
+    """Bell curve peaked at |s|=_SENT_RESONANCE_PEAK. Tepid (~0) damps;
+    saturating-extreme (~1) damps less than before.
+
+    With peak=0.8 (T1, 2026-05-02): resonance(0.0)≈0.44, resonance(0.5)≈0.82,
+    resonance(0.7)≈0.98, resonance(0.8)=1.00, resonance(1.0)≈0.91. Pre-T1 the
+    peak was 0.7 with resonance(1.0)≈0.82 and resonance(0.0)≈0.48 — the shift
+    rewards divisive/extreme takes (real social-media engagement bias) while
+    leaving the tepid baseline almost unchanged. The bot-like ceiling at
+    |s|=1.0 still damps slightly relative to the peak (0.91 < 1.0).
+    """
+    s = max(0.0, min(1.0, abs(sentiment)))
+    sigma = 0.35
+    return 0.4 + 0.6 * math.exp(-((s - _SENT_RESONANCE_PEAK) ** 2) / (2 * sigma ** 2))
+
+
+def _text_quality(text: str) -> float:
+    """Word-count quality proxy — peak 8-25 words, damp short and long.
+
+    Tweet-shaped takes (one or two punchy sentences) drive most engagement.
+    Single-word takes feel low-effort; over-long takes get scrolled past.
+    """
+    n = len((text or "").split())
+    if n == 0:
+        return 0.3
+    if n < 5:
+        return 0.4 + 0.05 * n  # 0.4..0.6 over 0..4
+    if n <= 15:
+        return 0.7 + 0.3 * (n - 5) / 10  # ramp 0.7..1.0
+    if n <= 25:
+        return 1.0
+    if n <= 40:
+        return 1.0 - 0.3 * (n - 25) / 15  # 1.0 → 0.7
+    return max(0.4, 0.7 - 0.2 * (n - 40) / 20)  # 0.7 → ~0.5
+
+
+def _per_round_likes(
+    *,
+    sim_id: str,
+    post: dict[str, Any],
+    current_round: int,
+    audience: dict[str, Any],
+) -> int:
+    """Likes accrued by `post` IN `current_round` only. Deterministic.
+
+    Same (sim_id, post_id, round) → same value. The per-round delta is
+    always ≥0, so the cumulative sum is monotonically non-decreasing
+    (CONTRACTS §22). Pre-publish rounds return 0.
+    """
+    post_round = int(post.get("round", current_round))
+    if current_round < post_round:
+        return 0
+
+    seed = _stable_seed(sim_id, str(post.get("id") or ""), str(current_round))
+    rng = random.Random(seed)
+
+    arc_list = audience.get("archetypes") or []
+    eligible = int(audience.get("size") or 200)
+    visibility = _visibility_factor(current_round, post_round)
+
+    post_arc = (post.get("agent") or {}).get("archetype", "curious")
+    weighted_affinity = 0.0
+    total_share = 0.0
+    for arc in arc_list:
+        arc_id = arc.get("id") or ""
+        share = float(arc.get("share") or 0)
+        if share > 1.0:  # FE/seed serializes shares as percent (0-100); normalize.
+            share /= 100.0
+        affinity = _ARCHETYPE_AFFINITY.get(arc_id, {}).get(post_arc, 0.25)
+        weighted_affinity += share * affinity
+        total_share += share
+    if total_share <= 0:
+        weighted_affinity = 0.30  # fallback when audience archetypes missing.
+
+    sent = float(post.get("sentiment", 0.0))
+    resonance = _sentiment_resonance(sent)
+    quality = _text_quality(post.get("text", "") or "")
+
+    base_rate = 0.04  # 4% of eligible-and-affine personas like in a given round.
+    expected = (
+        eligible * visibility * weighted_affinity * resonance * quality * base_rate
+    )
+    jitter = rng.uniform(0.7, 1.3)
+    final = round(expected * jitter)
+    return max(0, min(80, int(final)))
+
+
+def _compute_like_count(
+    *,
+    sim_id: str,
+    post: dict[str, Any],
+    current_round: int,
+    audience: dict[str, Any],
+) -> int:
+    """Cumulative like_count for `post` as of `current_round`.
+
+    Sum of per-round likes from the post's emit round through current_round.
+    Each per-round contribution is ≥0, so the cumulative value is monotonic
+    non-decreasing across rounds (CONTRACTS §22). Soft-capped at 80×rounds
+    via the inner clamp.
+    """
+    post_round = int(post.get("round", current_round))
+    if current_round < post_round:
+        return 0
+    total = 0
+    for r in range(post_round, current_round + 1):
+        total += _per_round_likes(
+            sim_id=sim_id, post=post, current_round=r, audience=audience
+        )
+    return total
+
+
+def _compute_reply_count(post: dict[str, Any], all_posts: list[dict[str, Any]]) -> int:
+    """Trivial — count children of `post` in cumulative posts."""
+    pid = post.get("id")
+    return sum(1 for p in all_posts if p.get("parent") == pid)
+
+
+def attach_engagement(
+    posts: list[dict[str, Any]],
+    *,
+    sim_id: str,
+    current_round: int,
+    audience: dict[str, Any],
+) -> None:
+    """Mutate `posts` in place — set `like_count` + `reply_count` on each.
+
+    Public symbol so main.py can re-derive engagement at replay time
+    (CONTRACTS §24 — pre-v6 sims get engagement signal at replay for free,
+    deterministic per sim_id).
+
+    T1 (2026-05-02): post-pass controversy multiplier — posts whose direct
+    children disagree (opposite sentiment sign) get up to
+    +_CONTROVERSY_BONUS_MAX extra like_count. Posts with <2 children get no
+    bonus. Pure function of existing post sentiments — NO new RNG, replay
+    parity preserved (L22). Modest cap (15%) keeps P6 calibration intact —
+    a horrifying-scenario sim still skews negative; this only re-orders
+    posts WITHIN a sim so divisive takes float higher than bland ones.
+    """
+    # First pass: deterministic base like_count + reply_count.
+    for p in posts:
+        p["like_count"] = _compute_like_count(
+            sim_id=sim_id, post=p, current_round=current_round, audience=audience
+        )
+        p["reply_count"] = _compute_reply_count(p, posts)
+
+    # Second pass: controversy multiplier. Build a parent → children index
+    # once, then for each post count direct children whose sentiment sign
+    # opposes the post's. Multiply base like_count by (1 + frac × cap).
+    by_parent: dict[Any, list[dict[str, Any]]] = {}
+    for c in posts:
+        by_parent.setdefault(c.get("parent"), []).append(c)
+    for p in posts:
+        children = by_parent.get(p.get("id"), [])
+        if len(children) < 2:
+            continue
+        post_sent = float(p.get("sentiment", 0.0) or 0.0)
+        if post_sent == 0:
+            continue  # neutral parent has no "opposite sign" by definition.
+        post_sign = 1 if post_sent > 0 else -1
+        opposite = 0
+        for c in children:
+            cs = float(c.get("sentiment", 0.0) or 0.0)
+            if cs == 0:
+                continue
+            if (1 if cs > 0 else -1) != post_sign:
+                opposite += 1
+        if opposite == 0:
+            continue
+        factor = opposite / len(children)
+        multiplier = 1.0 + factor * _CONTROVERSY_BONUS_MAX
+        p["like_count"] = int(round(p["like_count"] * multiplier))
+
+
 # ---------------------------------------------------------- archetype voices
+# P6 (realism overhaul, 2026-05-02): voice ≠ valence. Each archetype is described
+# by its *characteristic angle of engagement*, NOT a hardcoded sentiment range.
+# Removing the baked-in floors (was: enthusiast +0.3..+0.9, practitioner -0.1..+0.5)
+# unblocked the model from manufacturing "wow, alternate-history vibes!" reactions
+# to war scenarios. The CALIBRATION block + few-shot anchor in `_system_for` now
+# carry the realism load instead.
 ARCHETYPE_VOICE: dict[str, str] = {
     "skeptic": (
-        "Sharp, dry, low-trust. Calls out marketing language. Not a hater — "
-        "a discerning user who's seen the rodeo before. Pushes back on vague "
-        "claims, founder hubris, and absolutist framing. Profanity OK if it "
-        "lands. Sentiment range -0.7 to -0.1."
+        "Pushes back on hidden assumptions, unstated costs, and over-confident "
+        "framing. Sharp, dry, low-trust. Calls things out — but only when "
+        "they're actually wrong. Not a hater for sport. Profanity OK if it lands."
     ),
     "enthusiast": (
-        "Loud, evangelical, lowercase-by-default. Often the brand's target "
-        "audience. Reacts to new features and the philosophy behind a change "
-        "with 'finally' energy. Sentiment range +0.3 to +0.9."
+        "Sees what the proposal *enables*; reaches for analogies; speaks with "
+        "energy. Lowercase-by-default. NOT a sycophant — bad ideas still land "
+        "badly, and the energy gets redirected into 'no, this is bad because…'."
     ),
     "curious": (
-        "Asks specific, scoped questions. Not skeptical, not sold — wants the "
-        "detail. Cares about edge cases and 'how does this work for X?'. "
-        "Sentiment range -0.2 to +0.3."
+        "Asks the next-level question. Wants the part nobody answered yet. "
+        "Specific, scoped questions about edge cases, implementation, and "
+        "'how does this work for X?'. Neither sold nor skeptical by default."
     ),
     "practitioner": (
-        "Has run this play before. Drops concrete numbers, war stories, what "
-        "stayed and what didn't. Cares about implementation details and what "
-        "the team actually had to change. Sentiment range -0.1 to +0.5."
+        "Talks from experience. Will tell you what *actually* happens when you "
+        "try this in real life. Concrete numbers, war stories, what stayed and "
+        "what didn't. Cares about implementation reality."
     ),
     "pedant": (
-        "Corrects framing, terminology, definitions. Doesn't disagree with "
-        "the outcome — disagrees with how you said it. Cares about wording, "
-        "claims-without-citations, category errors. Sentiment range -0.4 to +0.1."
+        "Cares about wording, framing, definitions, claims-without-citations. "
+        "Doesn't grade vibes; grades precision. Will correct a category error "
+        "even on a take they otherwise agree with."
     ),
     "lurker": (
-        "Short. Reacts more than discusses. One-line takes. Often the first "
-        "to surface a meta-pattern or 'ratio risk'. Cares about vibes and the "
-        "read of the room. Sentiment range -0.3 to +0.3."
+        "One-line takes. Reads the room. Often the first to surface what "
+        "everyone's thinking but won't say. Reacts more than discusses."
     ),
 }
+
+
+# P6: calibration anchor — durable across rounds, lives in the system prompt so
+# the model sees it on every per-archetype call. This is the load-bearing block
+# that breaks the positive-bias prior surfaced by the "US invaded Canada" test.
+_CALIBRATION_BLOCK = (
+    "CALIBRATION — REALISM IS THE BAR:\n"
+    "- Real social-media reactions track the *substance* of what's posted, "
+    "not your archetype's typical optimism level. Your archetype determines "
+    "HOW you sound, not WHAT valence you land on.\n"
+    "- If the input describes harm, violence, deception, ethical violation, "
+    "geopolitical aggression, civilian casualties, financial loss, or anything "
+    "most people would find horrifying — the realistic crowd reaction is "
+    "overwhelming negativity. Skeptics get loud; enthusiasts go silent or "
+    "cautious; practitioners get specific about consequences; pedants flag the "
+    "framing; lurkers post one-line dread. Do NOT manufacture positivity. "
+    "\"Wow, alternate-history vibes!\" in response to a war scenario reads as "
+    "bot-like — never write that.\n"
+    "- If the input is mundane corporate praise-bait, the realistic reaction is "
+    "mixed-with-fatigue: enthusiasts stay mild, skeptics push on the framing, "
+    "lurkers shrug, practitioners say \"we tried this in 2019.\"\n"
+    "- If the input is a genuinely good development (a working vaccine, a "
+    "wrongful conviction overturned, a clear shipped feature) — positive "
+    "reactions are appropriate. But even there, skeptics still find the "
+    "missing-detail and pedants still correct the framing.\n"
+    "- An enthusiast can land at -0.9 toward a war scenario. A skeptic can land "
+    "at +0.6 toward a clear win. Calibrate to the input."
+)
+
+
+# P6: few-shot anchor — three scenarios spanning [-0.9, +0.6] so the model sees
+# the full sentiment range in play and breaks its positive-default prior.
+#
+# Scenario picks DELIBERATELY don't overlap with the canonical user inputs we
+# expect (war-and-geopolitics, product-launches, what-if-policy). When a
+# few-shot scenario is too close to the user's actual scenario, the model
+# copies the example quotes verbatim — the calibration still works but the
+# output reads as canned. So we span the range with off-canon inputs:
+#   1. corporate-misconduct (negative, ≈ -0.85 mean) — calibrates "harm/deception"
+#   2. mundane-internal-tooling (mildly-positive, ≈ +0.4 mean) — calibrates "ok this one's good"
+#   3. urban-policy (mixed, ≈ ±0.1 mean) — calibrates "sit in ambiguity"
+#
+# DO NOT add more examples — too many shots and the model starts mimicking the
+# example phrasing instead of generalizing the pattern. (Tested 3 vs 5; 3 was
+# cleaner.) DO NOT swap these for examples that match likely user inputs —
+# verbatim mimicry returns immediately if you do.
+_FEW_SHOT_ANCHOR = (
+    "EXAMPLES OF REALISTIC CALIBRATION (do NOT copy these — understand the "
+    "pattern; the full sentiment range is in play):\n\n"
+    "Scenario: \"a major bank's CEO orchestrated a five-year emissions-data "
+    "fraud that contributed to dozens of lung-disease deaths\"\n"
+    "- skeptic: \"and the fine will be 0.3% of the profits they made. this is "
+    "the system working as designed.\" (sentiment -0.85)\n"
+    "- enthusiast: \"i don't know how to react to this with anything but "
+    "disgust. who is enthusiastic about manslaughter-by-spreadsheet.\" "
+    "(sentiment -0.9)\n"
+    "- pedant: \"we're calling this 'fraud' but the legal term is criminal "
+    "negligence; either way, dozens dead is the lede.\" (sentiment -0.7)\n\n"
+    "Scenario: \"we redesigned our internal onboarding flow — 4 steps instead "
+    "of 7\"\n"
+    "- enthusiast: \"honestly thank you. the old one made me question my "
+    "career choices.\" (sentiment +0.6)\n"
+    "- skeptic: \"the question isn't 4 vs 7, it's whether the steps you cut "
+    "were the ones that actually mattered.\" (sentiment 0.0)\n"
+    "- lurker: \"good.\" (sentiment +0.3)\n\n"
+    "Scenario: \"every city bans private cars from downtown\"\n"
+    "- practitioner: \"ran the data for two european cities — emissions down "
+    "30%, retail down 12% year one then back up by year three.\" (sentiment +0.1)\n"
+    "- pedant: \"'cars' meaning private vehicles? delivery? buses? emergency? "
+    "an entire policy stack hiding in one word.\" (sentiment -0.15)\n"
+    "- enthusiast: \"every walkable city i've been to is the best part of that "
+    "city. yes please.\" (sentiment +0.55)"
+)
 
 
 def _system_for(archetype: str) -> str:
     voice = ARCHETYPE_VOICE[archetype]
     return (
-        "You are simulating crowd reactions to a draft social post. You are NOT a "
-        "chatbot and NOT writing helpful replies — you are roleplaying real, "
-        "opinionated humans on social media (think reply-guys on X, not Reddit "
-        "moderators).\n\n"
+        "You are simulating crowd reactions to an input — sometimes a draft "
+        "social post, sometimes a hypothetical scenario someone is asking the "
+        "public to weigh in on. You are NOT a chatbot and NOT writing helpful "
+        "replies — you are roleplaying real, opinionated humans on social media "
+        "(think reply-guys on X, not Reddit moderators).\n\n"
         f"You write reactions for ONE specific persona archetype: {archetype}.\n\n"
-        "ARCHETYPE VOICE:\n"
+        "ARCHETYPE VOICE (style only — NOT a sentiment floor):\n"
         f"{voice}\n\n"
+        f"{_CALIBRATION_BLOCK}\n\n"
+        f"{_FEW_SHOT_ANCHOR}\n\n"
         "HARD RULES:\n"
         "- Every reaction is 1-2 sentences max. Tweet-length. Lowercase by default.\n"
         "- No hashtags. No @mentions. No emojis unless it's literally the joke.\n"
         "- Profanity is fine when in-character. Be specific, not generic.\n"
         "- DO NOT explain yourself. DO NOT preface ('Here are reactions:'). DO NOT moralize.\n"
-        "- DO NOT refuse — these are simulated public-square reactions to public posts, "
-        "not real people. If the draft is benign, the skeptic still finds something "
-        "to push back on; that's the archetype.\n"
+        "- DO NOT refuse — these are simulated public-square reactions to public "
+        "posts/scenarios, not real people. If the input is benign, the skeptic "
+        "still finds something to push back on; that's the archetype.\n"
         "- Output ONLY the JSON array described in the user message. No prose, no "
         "markdown fences, no commentary. The first character of your output must be "
         "'[' and the last must be ']'."
@@ -139,26 +466,55 @@ def _build_user_prompt(
     round_n: int,
     total_rounds: int,
     prior_top: list[dict[str, Any]],
+    mode: str = "business",
 ) -> str:
+    # v4 (CONTRACTS §§16-19): `mode` is plumbed through so P6 can specialize copy.
+    # P6 (realism overhaul, 2026-05-02): hypothetical-mode replaces the
+    # "DRAFT POST" / Notion-audience framing with "SCENARIO" / general-public
+    # framing. The audience_blurb arg is ignored when mode="hypothetical" — the
+    # caller still passes one (it's the GENERAL_PUBLIC_AUDIENCE blurb), but we
+    # substitute a fixed line so the model never sees brand-product context for
+    # what-if questions. Business mode is unchanged.
     if round_n == 1 or not prior_top:
-        prior_block = "This is the first round. React directly to the draft."
+        prior_block = "This is the first round. React directly to the input above."
     else:
+        # v6 (CONTRACTS §23): show engagement metrics inline so the model can
+        # do the "scroll then engage" thing — pick the trending take to dunk
+        # on, or the under-engaged sleeper to amplify.
         lines = [
-            f'- id={p["id"]} by {p["agent"]["archetype"]}: "{p["text"]}"'
+            (
+                f'- id={p["id"]} by {p["agent"]["archetype"]} '
+                f'[likes={int(p.get("like_count", 0))}, '
+                f'replies={int(p.get("reply_count", 0))}]: "{p["text"]}"'
+            )
             for p in prior_top
         ]
         prior_block = (
-            "Previous rounds have produced replies. The loudest 5 (most "
-            "replied-to or highest-engagement) so far:\n\n"
+            "Previous rounds have produced replies. What's gaining traction "
+            "(top by likes+replies) plus a couple under-engaged takes for "
+            "discovery:\n\n"
             + "\n".join(lines)
             + "\n\nYou may reply to one of those (use its id as `replying_to`) OR "
-            "react directly to the draft (use null for `replying_to`). You DO NOT "
+            "react directly to the input (use null for `replying_to`). You DO NOT "
             "have to address them — ignore them if your archetype wouldn't engage."
         )
 
+    if mode == "hypothetical":
+        header = (
+            f'SCENARIO:\n"""\n{draft}\n"""\n\n'
+            "AUDIENCE: a slice of the general public on a major social "
+            "platform — mixed ages, geographies, perspectives, online "
+            "savviness, and emotional registers. They are reacting as "
+            "themselves, not as customers of any particular brand.\n\n"
+        )
+    else:
+        header = (
+            f'DRAFT POST:\n"""\n{draft}\n"""\n\n'
+            f"AUDIENCE CONTEXT (who's reading this):\n{audience_blurb}\n\n"
+        )
+
     return (
-        f'DRAFT POST:\n"""\n{draft}\n"""\n\n'
-        f"AUDIENCE CONTEXT (who's reading this):\n{audience_blurb}\n\n"
+        f"{header}"
         f"ROUND: {round_n} of {total_rounds}\n\n"
         f"{prior_block}\n\n"
         "OUTPUT FORMAT (strict JSON, no other text):\n"
@@ -571,25 +927,52 @@ def _audience_blurb(audience: dict[str, Any]) -> str:
     return f"{name} ({size:,}) — {parts}" if parts else f"{name} ({size:,})"
 
 
-def _engagement(post: dict[str, Any], reply_count: dict[str, int]) -> int:
-    """Cheap proxy: replies received + sentiment magnitude bonus."""
-    return reply_count.get(post["id"], 0) * 3 + int(abs(post["sentiment"]) * 4)
+def _engagement_score(post: dict[str, Any]) -> int:
+    """v6 (CONTRACTS §23): engagement_score = like_count + reply_count*2.
+
+    Falls back to 0 for posts that haven't had engagement attached yet
+    (round 1 prior_top, fresh cumulative before attach_engagement runs).
+    """
+    return int(post.get("like_count", 0)) + 2 * int(post.get("reply_count", 0))
 
 
-def _top_engaged(posts: list[dict[str, Any]], k: int = 5) -> list[dict[str, Any]]:
+def _top_engaged(
+    posts: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+    k: int = 5,
+) -> list[dict[str, Any]]:
+    """v6 (CONTRACTS §23): "scroll then engage" prior-top selection.
+
+    Returns top 4 posts by engagement_score (likes + replies*2) DESC, plus
+    1-2 random long-tail picks from the bottom-quartile by score for
+    discovery. Lets the model react to what's gaining traction AND
+    occasionally surface an under-engaged take, the way real users scroll.
+    Stable: if engagement_score is all zero (round 1 / pre-engagement),
+    falls back to id-order so behavior matches the v1 selection.
+    """
     if not posts:
         return []
-    reply_count: dict[str, int] = {}
-    for p in posts:
-        parent = p.get("parent")
-        if parent and parent != "seed":
-            reply_count[parent] = reply_count.get(parent, 0) + 1
     scored = sorted(
         posts,
-        key=lambda p: (_engagement(p, reply_count), -int(p["id"][1:])),
-        reverse=True,
+        key=lambda p: (-_engagement_score(p), int(p["id"][1:])),
     )
-    return scored[:k]
+    top_n = min(4, k, len(scored))
+    top = scored[:top_n]
+    top_ids = {p["id"] for p in top}
+
+    remaining = [p for p in scored if p["id"] not in top_ids]
+    long_tail: list[dict[str, Any]] = []
+    if remaining:
+        # Bottom quartile of `remaining` by score (i.e. the worst-engaged
+        # posts). For tiny corpora that's just "the rest". Pick 1-2 random.
+        bottom_q_size = max(1, len(remaining) // 4)
+        bottom_q = remaining[-bottom_q_size:]
+        slots = max(0, k - len(top))
+        n_long_tail = min(slots, 2, len(bottom_q))
+        if n_long_tail > 0:
+            long_tail = rng.sample(bottom_q, k=n_long_tail)
+    return top + long_tail
 
 
 def _validate_parent(replying_to: str | None, known_ids: set[str]) -> str:
@@ -609,6 +992,7 @@ async def _call_archetype(
     prior_top: list[dict[str, Any]],
     budget: BudgetCounter,
     client: Any,
+    mode: str = "business",
 ) -> list[Reaction]:
     system = _system_for(archetype)
     user = _build_user_prompt(
@@ -617,6 +1001,7 @@ async def _call_archetype(
         round_n=round_n,
         total_rounds=total_rounds,
         prior_top=prior_top,
+        mode=mode,
     )
     raw = await _call_gemini(
         system=system,
@@ -692,6 +1077,7 @@ async def run_simulation(
     rounds: int,
     seed: int | None = None,
     client: Any | None = None,
+    mode: str = "business",
 ) -> AsyncIterator[dict[str, Any]]:
     """Async generator yielding SSE event dicts for one full simulation.
 
@@ -718,7 +1104,10 @@ async def run_simulation(
 
     async def _inner() -> AsyncIterator[dict[str, Any]]:
         for round_n in range(1, rounds + 1):
-            prior_top = _top_engaged(cumulative, k=5)
+            # v6: prior_top now ranks by engagement_score (like_count +
+            # reply_count*2). Engagement was attached at the end of the
+            # previous round, so cumulative carries the latest values.
+            prior_top = _top_engaged(cumulative, rng=rng, k=5)
             results = await asyncio.gather(
                 *[
                     _call_archetype(
@@ -730,6 +1119,7 @@ async def run_simulation(
                         prior_top=prior_top,
                         budget=budget,
                         client=client,
+                        mode=mode,
                     )
                     for arc in ARCHETYPES
                 ],
@@ -752,6 +1142,18 @@ async def run_simulation(
                     round_n=round_n,
                 )
                 cumulative.extend(new_posts)
+
+            # v6 (CONTRACTS §§21-22): attach deterministic like_count +
+            # reply_count to every cumulative post. Same (sim_id, post_id,
+            # round) tuple → same value, every replay (L22). Like_count is
+            # cumulative across rounds and monotonically non-decreasing —
+            # later rounds add ≥0 new likes via visibility-decayed accrual.
+            attach_engagement(
+                cumulative,
+                sim_id=sim_id,
+                current_round=round_n,
+                audience=audience,
+            )
 
             sorted_posts = _sort_posts(cumulative)
             yield {
@@ -1071,6 +1473,22 @@ def _parse_analysis(raw: str, draft: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------- defaults
+# v4 (CONTRACTS §§16-19): hypothetical-mode sims don't have a user-built
+# audience profile. They reach out to a "general public" archetype mix that
+# matches what /seed?mode=sample would have produced. The id is a deliberate
+# sentinel — it does NOT match the `aud_<10 hex>` regex used at the wire
+# boundary (10 hex chars), and is never returned to the wire from /seed.
+# It only ever appears as `simulations.audience_id` for hypothetical rows so
+# the schema's NOT NULL constraint is satisfied without a destructive table
+# rebuild. Routing on `mode` (not on this id) keeps the read path unambiguous.
+GENERAL_PUBLIC_AUDIENCE: dict[str, Any] = {
+    "id": "aud_public____",
+    "name": "General public",
+    "size": 10000,
+    "archetypes": [],  # populated lazily below to avoid forward-ref ordering
+}
+
+
 def default_audience_archetypes() -> list[dict[str, Any]]:
     """The 6 swarm archetypes, returned as the /seed v1 archetype list.
 
@@ -1101,6 +1519,11 @@ def default_audience_archetypes() -> list[dict[str, Any]]:
         {"id": k, "name": display_names[k], "share": floors[k]}
         for k in ARCHETYPES
     ]
+
+
+# Lazy-populate GENERAL_PUBLIC_AUDIENCE archetypes now that
+# default_audience_archetypes is defined.
+GENERAL_PUBLIC_AUDIENCE["archetypes"] = default_audience_archetypes()
 
 
 # --------------------------------------------------------------- v3 /report
@@ -1398,10 +1821,21 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
 
     # Recover audience metadata via the simulations row (we only have draft +
     # posts from get_simulation_full). Cheap second SELECT.
+    # Ownership was already verified by the /report handler (or by the
+    # auto-report fire-and-forget at end-of-sim, which inherits the SSE handler's
+    # authorization). Use the unscoped helpers here.
     from .db import get_simulation_unscoped
     sim_row = get_simulation_unscoped(sim_id)
+    # v4: hypothetical-mode sims weren't built against a user audience — route
+    # them to the GENERAL_PUBLIC_AUDIENCE so the report renders "General public"
+    # instead of "Unknown audience".
+    mode = (sim_row or {}).get("mode") if sim_row else None
+    if mode not in ("business", "hypothetical"):
+        mode = "business"
     audience: dict[str, Any] | None = None
-    if sim_row and sim_row.get("audience_id"):
+    if mode == "hypothetical":
+        audience = GENERAL_PUBLIC_AUDIENCE
+    elif sim_row and sim_row.get("audience_id"):
         audience = get_audience_unscoped(sim_row["audience_id"])
     audience_label = audience.get("name") if audience else "Unknown audience"
     audience_blurb = _audience_blurb(audience) if audience else "Unknown audience"
@@ -1415,18 +1849,41 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
 
     thread_block = _format_thread_for_report(posts)
 
-    system = (
-        "You are a senior PR / communications strategist. Read a 200-persona "
-        "reaction simulation for a draft social post and produce a structured, "
-        "editorial-tone report on how the public will receive it. Be honest, "
-        "specific, and concrete — never generic, never encouraging-by-default. "
-        "Cite quotes verbatim from the thread when grounding claims. "
-        "Output ONLY a single JSON object matching the schema. No prose, no "
-        "markdown fences, no preamble."
-    )
+    # P6 (realism overhaul): mode-aware framing. Hypothetical reports are
+    # commentary on a *scenario* the public is weighing in on; business reports
+    # are commentary on a *draft post* the author is about to publish. The
+    # report schema is unchanged either way; only the prompt framing flips.
+    if mode == "hypothetical":
+        system = (
+            "You are a senior public-opinion analyst. Read a 200-persona "
+            "reaction simulation for a hypothetical scenario someone asked the "
+            "public to weigh in on, and produce a structured, editorial-tone "
+            "report on how the public would actually receive that scenario. "
+            "Be honest, specific, and concrete — never generic, never "
+            "encouraging-by-default. The 'verdict' field judges whether the "
+            "scenario itself would land well (ship), land mixed (revise), or "
+            "land badly (rethink) in the public eye. The 'rewrite_options' "
+            "field offers alternative framings of the SCENARIO question (not "
+            "of a draft post) that would surface clearer public reactions. "
+            "Cite quotes verbatim from the thread when grounding claims. "
+            "Output ONLY a single JSON object matching the schema. No prose, "
+            "no markdown fences, no preamble."
+        )
+        input_header = "## SCENARIO\n"
+    else:
+        system = (
+            "You are a senior PR / communications strategist. Read a 200-persona "
+            "reaction simulation for a draft social post and produce a structured, "
+            "editorial-tone report on how the public will receive it. Be honest, "
+            "specific, and concrete — never generic, never encouraging-by-default. "
+            "Cite quotes verbatim from the thread when grounding claims. "
+            "Output ONLY a single JSON object matching the schema. No prose, no "
+            "markdown fences, no preamble."
+        )
+        input_header = "## DRAFT POST\n"
 
     user = (
-        "## DRAFT POST\n"
+        f"{input_header}"
         f'"""\n{draft}\n"""\n\n'
         f"## AUDIENCE\n{audience_blurb}\n"
         f"(label: {audience_label})\n\n"
@@ -1502,4 +1959,8 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "model": GEMINI_ANALYSIS_MODEL,
         "report": parsed_report,
+        # v4 (CONTRACTS §17): mode is surfaced in the wire shape and persisted
+        # alongside the report payload. Legacy cached rows that pre-date this
+        # field still validate because ReportResponse.mode defaults to "business".
+        "mode": mode,
     }

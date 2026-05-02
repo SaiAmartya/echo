@@ -431,3 +431,105 @@ If the thinking model is unavailable / costs prohibitively / latency is unaccept
 ---
 
 **v3 LOCKED — 2026-05-02.** All v1 + v2 shapes preserved. Implementations land in Phase F.
+
+---
+
+## v4 (LOCKED — 2026-05-02): pivot to "what will people think if..."
+
+**v4 is purely additive over v1 + v2 + v3.** All prior shapes remain LOCKED. v4 introduces a `mode` discriminator on `/simulate/start` so the product can serve two flows: the existing `business` flow (audience-bound) and a new `hypothetical` flow ("what if X?") that doesn't require a user-built audience.
+
+### § 16. POST /simulate/start (additive update over v1 §2)
+
+**Request:**
+
+```ts
+{
+  "draft":       string,                              // 1..3500 (unchanged from v3 §13)
+  "mode":        "business" | "hypothetical",         // NEW; default "business" if absent
+  "audience_id": string | null,                       // NOW OPTIONAL; required when mode="business"
+  "rounds":      number                               // [3,6] (unchanged)
+}
+```
+
+**Response:** unchanged from v1 §2 — `{ simulation_id, rounds, status }`.
+
+### § 17. `mode` field on response shapes
+
+The following response models gain an additive `mode: "business" | "hypothetical"` field. Defaults to `"business"` for legacy rows (DB-level default) so existing cached payloads still validate.
+
+- **HistoryItem** (v2 §8) gains `mode`.
+- **ReplayResponse** (v2 §9) gains `mode`.
+- **ReportResponse** (v3 §12) gains `mode`.
+
+### § 18. New error code
+
+| Status | code | When |
+|---|---|---|
+| 400 | `audience_id_required_for_business_mode` | `mode="business"` and `audience_id` is null/missing on `/simulate/start` |
+
+All other errors from v1 §5 still apply. `unknown_audience` (404) only fires when `mode="business"` and the supplied `audience_id` is well-formed but not in the DB.
+
+### § 19. Backward compatibility
+
+- Legacy callers that omit `mode` get the default `"business"` — existing FE keeps working unchanged.
+- Existing `simulations` rows written before v4 default to `mode="business"` via SQLite DEFAULT on the new column (idempotent `ALTER TABLE … ADD COLUMN mode TEXT NOT NULL DEFAULT 'business'`).
+- Hypothetical-mode sims are routed against a built-in `GENERAL_PUBLIC_AUDIENCE` (id `aud_public____`, name `"General public"`, size 10000, archetypes = `default_audience_archetypes()`). The sentinel id is stored in `simulations.audience_id` to satisfy the schema's NOT NULL constraint; the read path routes on `mode`, not on the id shape, so this is invisible at the wire boundary.
+- Engine, prompt, budget, SSE shape — all unchanged in v4. Hypothetical-specific copy lands in P4/P6.
+
+---
+
+**v4 LOCKED — 2026-05-02.** All v1 + v2 + v3 shapes preserved. Implementations land in Phase 2.
+
+---
+
+## v5 (LOCKED — 2026-05-02): rounds range expanded
+
+### § 20. POST /simulate/start — additive update over v4 §16
+
+Request `rounds` field range changes from `[3, 6]` to `[5, 15]`.
+- Existing FE sending rounds in [3, 4] now receives 422 validation error.
+- Migration check: confirm no production rows depend on rounds < 5 before deploy.
+  Hackathon-stage: pre-Q1 sims with rounds<5 remain in DB; only NEW sims are constrained.
+- Default unchanged (FE picks its own default; backend just enforces range).
+
+
+---
+
+## v6 (LOCKED — 2026-05-02): real engagement signal on posts
+
+### § 21. SSE `event: round` — Post shape additive update
+
+Each post in `posts[]` gains two new fields:
+
+```ts
+{
+  // ... v1 §3 fields unchanged ...
+  "like_count": number,    // NEW — int ≥ 0; deterministic per (sim_id, post_id), monotonically non-decreasing across rounds
+  "reply_count": number    // NEW — int ≥ 0; computed as |{p in posts | p.parent == this.id}| at SSE emit time
+}
+```
+
+Both fields default to `0` if absent (backward-compat for v1-v5 callers / replays of pre-v6 sims).
+
+### § 22. Engagement semantics (server-side, FE consumes)
+
+- **`like_count` is computed deterministically**, not via LLM. Algorithm lives in `swarm.py`. Inputs: post archetype, post sentiment, post round, current round (for visibility decay), audience archetype mix. Same `(sim_id, post_id, round)` tuple → same `like_count`. **This guarantees replay parity** (L22).
+- **`like_count` is monotonically non-decreasing.** A post emitted in round N may have `like_count = 5` in round N's SSE event, then `like_count = 8` in round N+1's SSE event (because more rounds = more "scrolling personas" who saw and liked it). FE must accept the latest value per post-id.
+- **`reply_count` is recomputed on every SSE emit** as a function of cumulative posts. FE accepts the latest value.
+- Wire size impact: 2 small ints per post × ~90 posts at rounds=15 = ~1.5KB total. Negligible.
+
+### § 23. Smarter reply-targeting in `_build_user_prompt`
+
+The `prior_top` block (formerly "loudest 5 by id") now ranks prior posts by `engagement_score = like_count + reply_count * 2`, descending. The top 4 by score plus 1-2 random low-engagement posts are surfaced to each per-round-per-archetype prompt. This is the "scroll then engage" model: model sees trending + discovery, picks what to react to.
+
+This is a **prompt change**, not a wire change. FE/BE wire shapes unchanged.
+
+### § 24. Backward compatibility
+
+- v1-v5 wire shapes preserved.
+- Replays of pre-v6 simulations: backend re-derives `like_count`/`reply_count` from the deterministic algorithm at replay time (or returns 0 if the algorithm wasn't yet enabled — FE must tolerate 0).
+- Existing FE consuming v1 §3 posts will silently ignore the new fields. New FE relies on them for engagement-DESC sort + heart-pop animations.
+
+---
+
+**v6 LOCKED — 2026-05-02.** Implementations: backend in `swarm.py` engagement algorithm; frontend in `SwarmThread.tsx` indented tree + engagement re-sort.

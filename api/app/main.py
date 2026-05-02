@@ -37,6 +37,7 @@ from .db import (  # noqa: E402
     get_report,
     get_simulation,
     get_simulation_full,
+    get_simulation_unscoped,
     init_db,
     insert_audience,
     insert_round_event,
@@ -46,8 +47,10 @@ from .db import (  # noqa: E402
     upsert_report,
 )
 from .swarm import (  # noqa: E402
+    GENERAL_PUBLIC_AUDIENCE,
     GeminiUnavailableError,
     ReportSimNotFoundError,
+    attach_engagement,
     default_audience_archetypes,
     generate_report,
     get_report_lock,
@@ -108,8 +111,19 @@ class SimulateStartRequest(BaseModel):
     # v3 (CONTRACTS §13): draft cap raised 1000 → 3500 chars to support
     # PR posts, product launches, LinkedIn long-form, Twitter/X premium.
     draft: str = Field(min_length=1, max_length=3500)
-    audience_id: str = Field(pattern=_AUDIENCE_ID_PATTERN)
-    rounds: int = Field(default=5, ge=3, le=6)
+    # v4 (CONTRACTS §16): `mode` is additive with default "business" so
+    # legacy callers (no field) keep working unchanged. `audience_id` is now
+    # optional at the wire level; the handler enforces "required when
+    # mode=business" and surfaces a dedicated error code (§18). The pattern
+    # still applies when a value is provided — None bypasses it (verified via
+    # Context7 pydantic 2.x docs 2026-05-02).
+    mode: Literal["business", "hypothetical"] = "business"
+    audience_id: str | None = Field(default=None, pattern=_AUDIENCE_ID_PATTERN)
+    # v5 (CONTRACTS §20, 2026-05-02): rounds range expanded [3,6] → [5,15] to
+    # support the user-requested deeper-discourse mode. Per-sim budget cap was
+    # raised in lock-step (swarm.MAX_LLM_CALLS 40 → 100) to fit
+    # 6 archetypes × 15 rounds + 1 analysis + 1 report = 92 calls.
+    rounds: int = Field(default=5, ge=5, le=15)
 
 
 class SimulateStartResponse(BaseModel):
@@ -146,6 +160,8 @@ class HistoryItem(BaseModel):
     mean_sentiment: float
     created_at: str
     has_analysis: bool
+    # v4 (CONTRACTS §17): additive — defaults handled in db.list_simulations.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 class HistoryResponse(BaseModel):
@@ -167,6 +183,12 @@ class ReplayPost(BaseModel):
     agent: ReplayAgent
     sentiment: float
     text: str
+    # v6 (CONTRACTS §§21-22): engagement signal. Defaults to 0 for legacy
+    # rows whose stored payload predates the engagement engine. Replay
+    # handler re-derives these on-the-fly using the deterministic algorithm
+    # (same `(sim_id, post_id, round)` → same value, every time — L22).
+    like_count: int = 0
+    reply_count: int = 0
 
 
 class ReplayAnalysis(BaseModel):
@@ -182,6 +204,8 @@ class ReplayResponse(BaseModel):
     posts: list[ReplayPost]
     analysis: ReplayAnalysis | None
     created_at: str
+    # v4 (CONTRACTS §17): additive — defaults to "business" for legacy rows.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 # v3 (CONTRACTS §12): /report response models. Locked shapes.
@@ -223,6 +247,9 @@ class ReportResponse(BaseModel):
     generated_at: str
     model: str
     report: ReportBody
+    # v4 (CONTRACTS §17): additive — defaults to "business" for legacy
+    # cached report rows that pre-date the migration.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 # ---------------------------------------------------------------- endpoints
@@ -271,11 +298,28 @@ def simulate_start(
     req: SimulateStartRequest,
     uid: str = Depends(current_user_uid),
 ) -> SimulateStartResponse:
-    aud = get_audience(req.audience_id, uid)
-    if not aud:
-        raise _bad(404, "unknown_audience", "audience not found")
+    # v4 (CONTRACTS §§16-19):
+    #   - business    → audience_id REQUIRED, looked up via get_audience(); 404 if missing.
+    #   - hypothetical → audience_id IGNORED, persisted as the GENERAL_PUBLIC_AUDIENCE
+    #                    sentinel id so the schema's NOT NULL constraint stays satisfied
+    #                    without a destructive table rebuild. Routing on `mode` (not on
+    #                    audience_id presence) keeps the read path unambiguous.
+    if req.mode == "business":
+        if not req.audience_id:
+            raise _bad(
+                400,
+                "audience_id_required_for_business_mode",
+                "audience_id is required when mode=business",
+            )
+        aud = get_audience(req.audience_id, uid)
+        if not aud:
+            raise _bad(404, "unknown_audience", "audience not found")
+        stored_audience_id = req.audience_id
+    else:  # hypothetical
+        stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
+
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, uid, req.audience_id, req.draft, req.rounds)
+    insert_simulation(sim_id, uid, stored_audience_id, req.draft, req.rounds, mode=req.mode)
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
@@ -287,9 +331,18 @@ async def simulate_stream(
     sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
-    audience = get_audience_unscoped(sim["audience_id"])
-    if not audience:
-        raise _bad(404, "unknown_audience", "audience not found")
+    # v4 (CONTRACTS §§16-19): hypothetical-mode sims weren't bound to a user
+    # audience profile — short-circuit to GENERAL_PUBLIC_AUDIENCE so /simulate/stream
+    # works without a real row in the audiences table. Business-mode lookups
+    # use get_audience_unscoped because we already verified ownership of the
+    # parent simulation via get_simulation(simulation_id, uid) above.
+    sim_mode = sim.get("mode") if sim.get("mode") in ("business", "hypothetical") else "business"
+    if sim_mode == "hypothetical":
+        audience = GENERAL_PUBLIC_AUDIENCE
+    else:
+        audience = get_audience_unscoped(sim["audience_id"])
+        if not audience:
+            raise _bad(404, "unknown_audience", "audience not found")
 
     draft = sim["draft"]
     rounds = int(sim["rounds"])
@@ -301,6 +354,7 @@ async def simulate_stream(
                 draft=draft,
                 audience=audience,
                 rounds=rounds,
+                mode=sim_mode,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})
@@ -503,13 +557,45 @@ def simulate_replay(
                 log.warning("replay: skipping malformed analysis for %s: %r", simulation_id, exc)
                 analysis_obj = None
 
+        mode_raw = full.get("mode")
+        mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
+
+        # v6 (CONTRACTS §24): re-derive engagement on the fly so pre-v6
+        # sims (whose stored round_events JSON has no like_count/reply_count)
+        # still surface engagement at replay time. Algorithm is deterministic
+        # by (sim_id, post_id, round) — same sim → same like_counts on every
+        # replay (L22). For sims that already wrote engagement into the JSON,
+        # this just recomputes the same values.
+        posts_raw: list[dict[str, Any]] = list(full.get("posts") or [])
+        if posts_raw:
+            final_round = max(int(p.get("round", 0) or 0) for p in posts_raw)
+            # Ownership already verified by get_simulation_full(sim_id, uid)
+            # above; the unscoped lookups here are safe and avoid a redundant
+            # uid filter (the parent sim's uid trivially matches).
+            sim_row = get_simulation_unscoped(full["simulation_id"])
+            if mode == "hypothetical":
+                replay_audience = GENERAL_PUBLIC_AUDIENCE
+            elif sim_row and sim_row.get("audience_id"):
+                replay_audience = (
+                    get_audience_unscoped(sim_row["audience_id"]) or GENERAL_PUBLIC_AUDIENCE
+                )
+            else:
+                replay_audience = GENERAL_PUBLIC_AUDIENCE
+            attach_engagement(
+                posts_raw,
+                sim_id=full["simulation_id"],
+                current_round=final_round,
+                audience=replay_audience,
+            )
+
         return ReplayResponse(
             simulation_id=full["simulation_id"],
             draft=full["draft"],
             rounds=int(full["rounds"]),
-            posts=[ReplayPost(**p) for p in full["posts"]],
+            posts=[ReplayPost(**p) for p in posts_raw],
             analysis=analysis_obj,
             created_at=full["created_at"],
+            mode=mode,
         )
     except HTTPException:
         raise

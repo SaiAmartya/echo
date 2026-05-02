@@ -160,7 +160,8 @@ export type IconName =
   | "play" | "pause" | "users" | "replies" | "trendingUp" | "trendingDown"
   | "alert" | "check" | "x" | "search" | "plus" | "home" | "history"
   | "settings" | "command" | "chevronDown" | "arrowUpRight" | "bookmark"
-  | "zap" | "sparkles" | "refresh";
+  | "zap" | "sparkles" | "refresh" | "expand"
+  | "reply" | "retweet" | "heart" | "heartFilled" | "share";
 
 export function Icon({
   name,
@@ -280,6 +281,39 @@ export function Icon({
       <g>
         <path d="M21 12a9 9 0 1 1-3-6.7" />
         <polyline points="21,4 21,9 16,9" />
+      </g>
+    ),
+    expand: (
+      <g>
+        {/* Two-arrows-out-of-corners; subtle fullscreen affordance. */}
+        <polyline points="15,4 20,4 20,9" />
+        <polyline points="9,20 4,20 4,15" />
+        <line x1="20" y1="4" x2="14" y2="10" />
+        <line x1="4" y1="20" x2="10" y2="14" />
+      </g>
+    ),
+    reply: (
+      <path d="M21 12a8 8 0 0 1-11.4 7.2L3 21l1.8-5.4A8 8 0 1 1 21 12z" />
+    ),
+    retweet: (
+      <g>
+        <polyline points="17 1 21 5 17 9" />
+        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+        <polyline points="7 23 3 19 7 15" />
+        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+      </g>
+    ),
+    heart: (
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z" />
+    ),
+    heartFilled: (
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z" fill="currentColor" />
+    ),
+    share: (
+      <g>
+        <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+        <polyline points="16 6 12 2 8 6" />
+        <line x1="12" y1="2" x2="12" y2="15" />
       </g>
     ),
   };

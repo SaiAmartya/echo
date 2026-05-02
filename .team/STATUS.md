@@ -18,6 +18,17 @@ Updated by each agent after every meaningful task. One line per agent.
 | security-auditor (opus) | ✅ done | 2026-05-02 02:48 | E3 audit + fix (commits 968c460, 5038d91); despawned. Lead applied semaphore-scope fix (24e62bf) |
 | backend-engineer-3 (opus) | ✅ done | 2026-05-02 03:20 | F1+F2+F3 backend (commit 3ac2824) — gemini-3-flash-preview verified, 3500 char cap, /report endpoint cached + concurrency-guarded |
 | frontend-engineer-3 (opus) | ✅ done | 2026-05-02 03:15 | F1+F3 frontend (commit 3ffdd01) — Composer 3500 cap, See full report button, /report page editorial layout |
+| frontend-engineer-4 (opus, general-purpose) | ✅ done | 2026-05-02 04:00 | P1 done (commit 93710fd) — sidebar trim, mode dropdown, mode-aware hero, /→/compose redirect, auto-seed safety net. Despawned. |
+| backend-engineer-4 (opus, general-purpose) | ✅ done | 2026-05-02 05:25 | P2 done (commit 72515ec) — wire contract v4 additive (mode field, optional audience_id, GENERAL_PUBLIC_AUDIENCE, idempotent DB migration). 8/8 wire tests green. Despawned. |
+| frontend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 05:30 | P3 done (commit 3ac1944) — mode plumbed end-to-end, sessionStorage persistence, mode chips on /history+/report, /simulating @notion-attribution dropped for hypothetical. 6/6 browser E2E green. Despawned. |
+| prompt-engineer-1 (opus, general-purpose) | ✅ done | 2026-05-02 05:46 | P6 done (commit b8282d2) — realism overhaul, dropped sentiment floors, calibration block + off-canon few-shot, mode-aware report prompt. 3/3 verification scenarios pass (A: -0.607 mean, B: +0.086 mean with 3/6 archetypes positive, C: -0.186 mean). Caught + fixed verbatim-mimicry between iter-1 and iter-2. Despawned. |
+| backend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 06:08 | Q1-BE done (commit c2d73c2) — rounds [3,6]→[5,15], MAX_LLM_CALLS default 40→100, RULES.md R2 + CONTRACTS v5 §20 LOCKED. Full rounds=15 sim + report verified (340 posts, verdict rethink). api/.env had hardcoded =40 override, bumped locally to 100; flagged in handoff. Despawned. |
+| frontend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:18 | Q1-FE+Q2 done (commit 7bacfb0) — rounds dropdown 5-15 next to mode chip, sessionStorage persistence (with hydrate-race bug fix as bonus), Q2 report-ready gate with retry-on-failure. 9/9 Chrome-MCP E2E (skipped destructive test for safety). Despawned. |
+| frontend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 06:30 | Q3 done (commit 4b20857) — X-style tweet cards, word-by-word typing reveal, organic archetype-weighted likes, 1.8s ± jitter pacing, room graph dimmed to 60/40, hydration warning fixed, mulberry32-seeded PRNG for replay parity. 76.8 avg fps at rounds=15 (well above 50 gate). GIF captured to ~/Downloads/q3_thread_reveal.gif. Despawned. |
+| backend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:55 | R1 done (commit 13bb725) — engagement engine: 6×6 archetype affinity matrix, deterministic mulberry-equivalent likes seeded by (sim_id, post_id, round), smarter prior_top by engagement DESC + long-tail discovery. 7/7 verifications green; viral-take-attracts-dunks pattern surfaced (e.g. enthusiast p5 score=447 attracted skeptic dunks in r4/r5). Zero new LLM calls — budget unchanged. Despawned. |
+| frontend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 07:00 | R2 done (commit 37335b0) — parent-child tree rendering with level-1 indent + vertical thread line; FLIP-based engagement-DESC re-sort animation (600ms cubic-bezier, "thread settles" vibe) on report-pending phase; TweetCard drops cosmetic mulberry32, consumes wire like_count/reply_count with growth-detected heart-pop. 8/8 Chrome MCP verifications, GIF captured at ~/Downloads/r2_engagement_sort.gif (2.7MB, 14s). 213 posts initial render in 265ms. Despawned. |
+| frontend-engineer-9 (opus, general-purpose) | ✅ done | 2026-05-02 07:30 | S1 done (commit 79109b9) — inline report panel: extracted ReportBody + ReportSidePanel, /simulating phase machine adds "ready" (no more redirect), subtle fullscreen icon top-right, /history click → /simulating replay. 10/10 Chrome MCP verifications, GIF at ~/Downloads/s1_inline_report.gif (5.3MB, 27 frames). Despawned. |
+| backend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 07:35 | T1 done (commit 36e726a) — minor divisive-content bias: `_sentiment_resonance` peak 0.7→0.8 (extreme posts closer to peak, |s|=1.0 lifts +0.094); attach_engagement post-pass controversy multiplier (≤+15% on posts whose ≥2 children disagree in sign). Module-top constants `_SENT_RESONANCE_PEAK` + `_CONTROVERSY_BONUS_MAX` for dialing. 4/4 scenarios verified — P6 calibration intact (Canada -0.494, Notion +0.135, schools -0.215, athletes -0.089). Determinism preserved. Despawned. |
 
 ## Phase tracker
 
@@ -29,8 +40,24 @@ Updated by each agent after every meaningful task. One line per agent.
 - [x] **F1** — char cap raise 280 → 3500 (bundled into F1+F2+F3 commits)
 - [x] **F2** — analysis call → Gemini 3 Flash Preview (thinking enabled via config; full thread context)
 - [x] **F3** — POST /report endpoint + /report editorial page (commits 3ac2824, 3ffdd01). Awaiting human QA per R9.
-- [ ] **F-fix** — /report 409 race + auto-generate after every sim + italics readability (lead has italics; debugger-2 has backend; QA after both land)
-- [ ] **F4** — Swarm intelligence depth pass (per user direction: "make star feature more smart and comprehensive to truly replicate the public" — awaits proposal after F-fix QA passes)
+- [x] **F-fix** — /report 409 race + auto-generate after every sim + italics readability (commits ef1fb4d, 59aa049, eef2476). Approved.
+- [ ] **P (Pivot)** — Reposition Echo from "social-post pre-flight" to "what will people think if..." — plan approved 2026-05-02, see `~/.claude/plans/melodic-mixing-sunset.md`.
+  - [x] **P1** — UX cleanup + mode dropdown stub (commit 93710fd, pushed). Human-QA'd 2026-05-02.
+  - [x] **P2** — Backend wire contract v4 additive (commit 72515ec, pushed). 8/8 wire tests green.
+  - [x] **P3** — Frontend wires real mode behavior (commit 3ac1944, pushed). 6/6 browser E2E green.
+  - [x] **P6** — Realism overhaul (commit b8282d2, pushed). 3/3 verification scenarios pass; user-flagged "US invaded Canada" regression resolved (mean swung from ≈+0.3 to -0.607).
+  - [x] **P5** — Demo polish + push (lead). LEARNINGS L16-L18 appended. Pivot complete.
+- [x] **Q (Quality batch)** — Post-pivot quality pass on rounds, redirect gating, and thread visual feel.
+  - [x] **Q1-BE** — rounds [3,6]→[5,15], MAX_LLM_CALLS 40→100, RULES.md R2 + CONTRACTS v5 §20 (commit c2d73c2, pushed)
+  - [x] **Q1-FE+Q2** — rounds dropdown next to mode chip + report-ready redirect gate + hydrate-race bug fix (commit 7bacfb0, pushed)
+  - [x] **Q3** — X-style thread reveal: tweet cards, typing animation, organic likes, paced reveal, hydration warning fix (commit 4b20857, pushed). 76.8 avg fps at rounds=15.
+- [x] **R (engagement signal batch)** — Real likes + indented threads + engagement-DESC sort.
+  - [x] **CONTRACTS v6 §§21-24** locked (commit f4d0ce3, pushed) — like_count + reply_count on Post; deterministic per (sim_id, post_id, round); smarter prior_top by engagement.
+  - [x] **R1** — engagement engine in swarm.py (commit 13bb725, pushed). 7/7 verifications.
+  - [x] **R2** — indented thread tree + FLIP engagement-DESC re-sort (commit 37335b0, pushed). 8/8 Chrome MCP verifications + GIF.
+- [x] **S1** — Inline report panel + subtle fullscreen toggle (commit 79109b9, pushed). 10/10 Chrome MCP verifications + GIF (~/Downloads/s1_inline_report.gif).
+- [x] **T1** — Minor divisive-content bias in engagement algorithm (commit 36e726a, pushed). 4/4 scenarios verified, P6 realism preserved.
+- [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
 ## Honest verification gap (per user concern, 2026-05-02)

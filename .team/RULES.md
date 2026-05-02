@@ -17,10 +17,12 @@ When you do verify, **say so in your commit message or report-back**: e.g., "goo
 
 Echo has a hackathon budget. Limits are LOCKED, not advisory:
 
-- **≤40 Gemini calls per simulation.** Counter raises `BudgetExceededError` on the 41st call. Never silent fan-out.
+- **≤100 LLM calls per simulation.** Counter raises `BudgetExceededError` on the 101st call. Never silent fan-out.
 - **≤6 concurrent calls** via `asyncio.Semaphore(6)` (process-global).
 - **Model = `gemini-2.5-flash-lite`.** No upgrades without team-lead approval.
 - **≤256 output tokens per call.**
+
+> **Note (Q1, 2026-05-02):** raised from 40 → 100 to support user-requested rounds=15 (6 archetypes × 15 + 1 analysis + 1 report = 92 calls). Cost stays acceptable (~$0.01/sim with mixed-model strategy: flash-lite reactions + Gemini 3 thinking analysis/report). Concurrency cap unchanged.
 
 If a phase looks like it'll cost more than its allotted estimate in `.team/STATUS.md` budget ledger, stop and message team-lead before spending.
 

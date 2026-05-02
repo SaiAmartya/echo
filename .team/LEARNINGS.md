@@ -88,6 +88,53 @@ We're inspired by MiroFish (a 58k-star multi-month project). For a hackathon: cl
 
 We never had a successful browser-driven E2E test until the user manually connected the Claude Chrome extension. **I documented this gap clearly in `.team/STATUS.md`** rather than papering over it. Wire tests + human QA carried the project. The honesty made the user trust me more, not less.
 
+## L16 — Few-shot examples that match likely user inputs become parrot prompts
+
+P6 (realism overhaul) iter-1: I supplied few-shot anchors that matched the verification scenarios (US/Canada war, calmer notifications, four-day school weeks). The numerical sentiment targets all passed but **round-1 reactions copied my example quotes verbatim**. The model used my "examples of how to think" as templates to fill in.
+
+prompt-engineer-1 iter-2 fix: swapped to off-canon anchors (bank-CEO emissions fraud / internal onboarding redesign / city-bans-private-cars) — same `[-0.9, +0.6]` sentiment span, zero overlap with likely user input. Fixed it cleanly. The fix is now documented inline in `swarm.py` so future contributors don't undo it.
+
+**General rule:** few-shot anchors should *demonstrate the shape* of the desired output, not *resemble* probable user inputs. If your golden test cases match your few-shot scenarios, you're not testing the model — you're testing your own examples.
+
+## L17 — Wiping `.next/` while the dev server is running breaks routes silently
+
+frontend-engineer-4's P1 commit landed clean (typecheck green), but when the user QA'd, `/` and `/compose` 404'd while `/history` 200'd. Cause: agent had run `rm -rf .next tsconfig.tsbuildinfo` to recover from a stale-types issue; the dev server's in-memory route manifest pointed at files that no longer existed. Routes JIT-compiled before the wipe survived; new/modified routes died.
+
+**Fix recipe:** if any agent ever runs `rm -rf .next` for any reason, the dev server PID must be killed and restarted. `npm run typecheck` clean ≠ dev server clean. Adding to spawn template: agents must coordinate with the lead before nuking `.next` if a server is running. (Also: prefer `rm -rf .next/cache` over the whole `.next/` — narrower blast radius.)
+
+## L19 — Deploy-env files silently override codebase defaults
+
+Q1-BE raised `MAX_LLM_CALLS_PER_SIMULATION` default from 40 to 100 in `swarm.py`. But `api/.env` had `MAX_LLM_CALLS_PER_SIMULATION=40` hardcoded — and `.env` is gitignored, so the default raise had zero effect at runtime until backend-engineer-5 manually bumped the local `.env`. The commit only contains the codebase change.
+
+**Rule:** when a .env-overridable default changes, either (a) bump the deployment's `.env.example` / `.env.sample` to match the new default, or (b) remove the override from local `.env` files and rely on the codebase default, or (c) call out the deploy-time bump explicitly in the commit message and any deploy runbook. Future-self deploying to a fresh machine will pull a stale `.env`, set the override back to 40, and silently reintroduce the budget regression.
+
+## L20 — Hydrate-on-mount + persist-on-change requires a `hydrated` gate
+
+Q1-FE caught a real bug while implementing rounds-dropdown sessionStorage persistence: in compose/page.tsx, the persist effects (`useEffect` writing to `sessionStorage`) were firing on the very first render with initial state values, BEFORE the hydrate effect's `setState` calls had taken effect. The persist effects clobbered the loaded values with the defaults. draft + mode + rounds all had this latent bug; one fix uniformly applied (a `hydrated` boolean state, gated on by all three persist effects).
+
+**Rule:** when you have both a hydrate-on-mount effect AND persist-on-change effects targeting the same storage, gate the persist effects on a `hydrated` flag set inside the hydrate effect. Don't trust effect ordering or "the persist effect runs second so it sees the hydrated state" — React 18 may schedule them in either order under StrictMode dev double-mount.
+
+## L21 — Animation pacing is subjective; document the knobs in the commit
+
+Q3 (X-style thread reveal) introduced a half-dozen pacing/animation constants — `MIN_ROUND_VISIBLE_MS`, `INGEST_MIN_GAP_MS` jitter range, `LIVE_WINDOW`, per-archetype `LIKE_PROBABILITY`/`LIKE_MAX`. The user can subjectively decide they want it slower or punchier, and the next agent tuning it should NOT have to grep for "fps" or "1800" to find the dials.
+
+frontend-engineer-7 documented the four most-likely tuning knobs with file:line in the handoff message. **That's the bar going forward** for any subjective UX phase: handoff includes the tuning-knob index, not just "feels good."
+
+## L22 — Deterministic PRNG seeded by stable id preserves replay parity for FE-only state
+
+Q3 needed organic-feeling like counts and probability of likes per post — but those values must be IDENTICAL between live render and replay so the user re-watching their sim sees the same heart counts. Solution: mulberry32 PRNG seeded by the post id (`p1`, `p2`, …). FE-only state, no wire shape change. Same input id → same like count + same probability roll, every time.
+
+**Rule:** when adding FE-only animation state that must survive replay, derive it deterministically from a stable identifier already in the post payload — don't pipe new state through the SSE/replay contracts.
+
+## L18 — The pivot model: additive contracts, mode-aware prompts, default to the new front door
+
+Pivoting from "social-post pre-flight for marketing" to "what will people think if..." worked because we:
+1. **Locked v4 contract additively** (mode field with `default = "business"` for backward-compat). Old FE keeps working without modification. New FE drives the new flow. No migration coordination needed.
+2. **Mode-aware prompts, not separate engines.** Same archetype loop, same budget caps, same SSE shape — only the user-prompt header (`DRAFT POST` → `SCENARIO`) and audience_blurb differ. P6 added calibration on top, but the engine never moved.
+3. **Made the new mode the default.** "Hypothetical situation" defaults the dropdown; `/` redirects to `/compose`. The old flow is reachable but not promoted. This is the L13 lesson applied at the *application* level: if the pivot's framing is the killer-flow, make the killer-flow the default.
+
+Cost: ~140 LLM calls across all 4 phases (P1 0, P2 ~20, P3 ~20, P6 ~120 with two iterations). One Sunday afternoon of agent-driven execution. The most expensive single decision was **iter-1 of P6** burning ~60 calls before the mimicry catch — a verification-loop-level cost, not a wasted-effort cost.
+
 ---
 
 ## Architectural notes specific to echo (may inform the upcoming pivot)

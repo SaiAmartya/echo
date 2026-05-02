@@ -171,11 +171,17 @@ function HistoryPageInner() {
                   key={h.simulation_id}
                   role="link"
                   tabIndex={0}
-                  onClick={() => router.push(`/report?id=${encodeURIComponent(h.simulation_id)}`)}
+                  onClick={() =>
+                    router.push(
+                      `/simulating?id=${encodeURIComponent(h.simulation_id)}&replay=1`,
+                    )
+                  }
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      router.push(`/report?id=${encodeURIComponent(h.simulation_id)}`);
+                      router.push(
+                        `/simulating?id=${encodeURIComponent(h.simulation_id)}&replay=1`,
+                      );
                     }
                   }}
                   style={{
@@ -203,6 +209,9 @@ function HistoryPageInner() {
                   >
                     <Badge tone={badge.tone} dot>
                       {badge.label}
+                    </Badge>
+                    <Badge tone="neutral">
+                      {h.mode === "hypothetical" ? "Hypothetical" : "Business"}
                     </Badge>
                     <span style={{ color: h.mean_sentiment >= 0 ? "#7dd49a" : "#f06c5a" }}>
                       {h.mean_sentiment >= 0 ? "+" : ""}

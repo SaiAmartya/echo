@@ -8,13 +8,33 @@ import { Frame, PageHeader, StepIndicator } from "@/components/Shell";
 import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
 import { Icon } from "@/components/ui/Primitives";
-import { api, ApiError, type Audience } from "@/lib/api";
+import { api, ApiError, type Audience, type SimulationMode } from "@/lib/api";
 import { RequireAuth } from "@/components/auth/RequireAuth";
 
-const ROUND_OPTIONS = [3, 4, 5, 6] as const;
+// v5 §20 — rounds range expanded to [5, 15]. Backend now 422s on rounds<5.
+const ROUND_OPTIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 const DEFAULT_ROUNDS = 5;
 
-type Mode = "hypothetical" | "business";
+type Mode = SimulationMode;
+const MODE_STORAGE_KEY = "echo:mode";
+const ROUNDS_STORAGE_KEY = "echo:rounds";
+
+function isMode(v: string | null): v is Mode {
+  return v === "hypothetical" || v === "business";
+}
+
+function loadMode(): Mode {
+  if (typeof window === "undefined") return "hypothetical";
+  const raw = window.sessionStorage.getItem(MODE_STORAGE_KEY);
+  return isMode(raw) ? raw : "hypothetical";
+}
+
+function loadRounds(): number {
+  if (typeof window === "undefined") return DEFAULT_ROUNDS;
+  const raw = window.sessionStorage.getItem(ROUNDS_STORAGE_KEY);
+  const n = raw == null ? NaN : Number.parseInt(raw, 10);
+  return ROUND_OPTIONS.includes(n as (typeof ROUND_OPTIONS)[number]) ? n : DEFAULT_ROUNDS;
+}
 
 const MODE_OPTIONS: ReadonlyArray<{ value: Mode; label: string }> = [
   { value: "hypothetical", label: "Hypothetical situation" },
@@ -64,53 +84,72 @@ function ComposePageInner() {
   const [mode, setMode] = useState<Mode>("hypothetical");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // `hydrated` gates the persist-on-change effects so they don't run on the
+  // first commit (when state still holds the SSR-default values) and clobber
+  // the real persisted values before the hydrate effect can `setRounds(...)`
+  // / `setDraft(...)` / `setMode(...)`. Without this guard, navigating back
+  // to /compose silently resets every persisted field to its default.
+  const [hydrated, setHydrated] = useState(false);
 
+  // Hydrate from sessionStorage on mount. P1's safety-net auto-seed is gone:
+  // hypothetical mode (the new default) doesn't need an audience at all, and
+  // business mode now seeds inside onRun if needed.
   useEffect(() => {
-    const cached = loadAudience();
-    setAudience(cached);
+    setAudience(loadAudience());
     setDraft(loadDraft());
-
-    // P1 safety net: Audience sidebar tab is gone, so if nothing's cached,
-    // silently seed the sample audience so simulate-start keeps working.
-    // P3 will rewire this to depend on selected mode.
-    if (!cached) {
-      let cancelled = false;
-      void (async () => {
-        try {
-          const aud = await api.seed({ mode: "sample", payload: null });
-          if (cancelled) return;
-          window.sessionStorage.setItem("echo:audience", JSON.stringify(aud));
-          setAudience(aud);
-        } catch {
-          // Swallow — onRun will surface a clearer error if the user submits.
-        }
-      })();
-      return () => {
-        cancelled = true;
-      };
-    }
+    setMode(loadMode());
+    setRounds(loadRounds());
+    setHydrated(true);
   }, []);
 
-  // Keep the draft in sessionStorage as the user types so /results can return.
+  // Persist rounds choice so it survives /compose remounts and a navigate-back.
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !hydrated) return;
+    window.sessionStorage.setItem(ROUNDS_STORAGE_KEY, String(rounds));
+  }, [rounds, hydrated]);
+
+  // Keep the draft in sessionStorage as the user types so /report can return.
+  useEffect(() => {
+    if (typeof window === "undefined" || !hydrated) return;
     window.sessionStorage.setItem("echo:draft", draft);
-  }, [draft]);
+  }, [draft, hydrated]);
+
+  // Persist selected mode so /simulating (and a refresh of /compose) can read it.
+  useEffect(() => {
+    if (typeof window === "undefined" || !hydrated) return;
+    window.sessionStorage.setItem(MODE_STORAGE_KEY, mode);
+  }, [mode, hydrated]);
 
   const onRun = async () => {
     if (submitting) return;
-    if (!audience) {
-      setError("Audience still loading — give it a moment and try again.");
-      return;
-    }
     setSubmitting(true);
     setError(null);
     try {
-      const resp = await api.simulateStart({
-        draft,
-        audience_id: audience.audience_id,
-        rounds,
-      });
+      let resp;
+      if (mode === "hypothetical") {
+        // Hypothetical: backend routes against the built-in general public
+        // audience. Omit audience_id entirely — cleaner wire (per v4 §16).
+        resp = await api.simulateStart({
+          draft,
+          mode: "hypothetical",
+          rounds,
+        });
+      } else {
+        // Business: ensure we have an audience cached. If not, seed the sample
+        // audience inline (the Audience sidebar tab is gone in v4).
+        let aud = audience;
+        if (!aud) {
+          aud = await api.seed({ mode: "sample", payload: null });
+          window.sessionStorage.setItem("echo:audience", JSON.stringify(aud));
+          setAudience(aud);
+        }
+        resp = await api.simulateStart({
+          draft,
+          mode: "business",
+          audience_id: aud.audience_id,
+          rounds,
+        });
+      }
       sessionStorage.setItem("echo:simulation", JSON.stringify(resp));
       router.push(`/simulating?id=${encodeURIComponent(resp.simulation_id)}`);
     } catch (e) {
@@ -127,51 +166,74 @@ function ComposePageInner() {
 
   const hero = MODE_HERO[mode];
 
-  const modeDropdown = (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        whiteSpace: "nowrap",
-        background: "var(--surface-2)",
-        border: "1px solid var(--border)",
-        padding: "6px 10px",
-        borderRadius: 999,
-        fontSize: 12,
-        color: "var(--fg-2)",
-        position: "relative",
-      }}
-    >
-      <Icon name="users" size={13} />
-      <select
-        value={mode}
-        onChange={(e) => setMode(e.target.value as Mode)}
-        style={{
-          appearance: "none",
-          WebkitAppearance: "none",
-          MozAppearance: "none",
-          background: "transparent",
-          border: "none",
-          outline: "none",
-          color: "var(--fg-2)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          paddingRight: 18,
-          cursor: "pointer",
-        }}
-      >
-        {MODE_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-      <Icon
-        name="chevronDown"
-        size={12}
-        style={{ opacity: 0.6, position: "absolute", right: 10, pointerEvents: "none" }}
-      />
+  const chipStyle = {
+    display: "inline-flex" as const,
+    alignItems: "center" as const,
+    gap: 6,
+    whiteSpace: "nowrap" as const,
+    background: "var(--surface-2)",
+    border: "1px solid var(--border)",
+    padding: "6px 10px",
+    borderRadius: 999,
+    fontSize: 12,
+    color: "var(--fg-2)",
+    position: "relative" as const,
+  };
+  const selectStyle = {
+    appearance: "none" as const,
+    WebkitAppearance: "none" as const,
+    MozAppearance: "none" as const,
+    background: "transparent",
+    border: "none",
+    outline: "none",
+    color: "var(--fg-2)",
+    fontFamily: "var(--font-sans)",
+    fontSize: 12,
+    paddingRight: 18,
+    cursor: "pointer",
+  };
+  const chevronStyle = {
+    opacity: 0.6,
+    position: "absolute" as const,
+    right: 10,
+    pointerEvents: "none" as const,
+  };
+
+  const audienceSlot = (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <span style={chipStyle}>
+        <Icon name="users" size={13} />
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value as Mode)}
+          style={selectStyle}
+          aria-label="Simulation mode"
+        >
+          {MODE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <Icon name="chevronDown" size={12} style={chevronStyle} />
+      </span>
+      <span style={chipStyle}>
+        <Icon name="refresh" size={13} />
+        <span style={{ fontSize: 12, color: "var(--fg-2)" }}>rounds</span>
+        <select
+          value={rounds}
+          onChange={(e) => setRounds(Number.parseInt(e.target.value, 10))}
+          style={{ ...selectStyle, fontFamily: "var(--font-mono)" }}
+          aria-label="Number of rounds"
+        >
+          {ROUND_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <Icon name="chevronDown" size={12} style={chevronStyle} />
+      </span>
     </span>
   );
 
@@ -184,51 +246,10 @@ function ComposePageInner() {
           draft={draft}
           setDraft={setDraft}
           audience=""
-          audienceSlot={modeDropdown}
+          audienceSlot={audienceSlot}
           onRun={onRun}
           disabled={submitting}
         />
-
-        {/* Rounds picker — compact slider-style */}
-        <div
-          style={{
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 12,
-            padding: 16,
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-          }}
-        >
-          <div style={{ fontSize: 13, color: "var(--fg-1)" }}>Rounds</div>
-          <div style={{ flex: 1, display: "flex", gap: 6 }}>
-            {ROUND_OPTIONS.map((n) => {
-              const active = rounds === n;
-              return (
-                <span
-                  key={n}
-                  onClick={() => setRounds(n)}
-                  style={{
-                    flex: 1,
-                    textAlign: "center",
-                    padding: "8px 0",
-                    borderRadius: 6,
-                    fontSize: 13,
-                    background: active ? "var(--surface-2)" : "transparent",
-                    border: "1px solid " + (active ? "var(--border-strong)" : "var(--border)"),
-                    color: active ? "var(--fg-1)" : "var(--fg-2)",
-                    cursor: "pointer",
-                    fontFamily: "var(--font-mono)",
-                  }}
-                >
-                  {n}
-                </span>
-              );
-            })}
-          </div>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>~90s</span>
-        </div>
 
         {error && (
           <div
