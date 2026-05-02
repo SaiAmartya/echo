@@ -103,6 +103,24 @@ _ARCHETYPE_AFFINITY: dict[str, dict[str, float]] = {
 }
 
 
+# T1 (2026-05-02): minor divisive-content bias dials. Module-top so the lead
+# can tune post-QA without function-body surgery. Both tweaks are deterministic
+# (pure functions of existing post sentiments / ids) — no new RNG, replay
+# parity preserved (L22).
+#
+# - _SENT_RESONANCE_PEAK: |sentiment| at which the bell curve in
+#   _sentiment_resonance maxes out. Shifted from the original 0.7 to 0.8 so
+#   high-magnitude takes (|s|>=0.7) get more lift than bland-but-positive
+#   ones; tepid (|s|≈0) is essentially unchanged. resonance(1.0) lifts from
+#   ~0.82 → ~0.91 — saturating-extreme posts stop underperforming.
+# - _CONTROVERSY_BONUS_MAX: ceiling of the post-pass multiplier applied in
+#   attach_engagement to posts whose direct replies disagree (opposite
+#   sentiment sign). 0.15 = up to +15% for 100%-opposite-sign children;
+#   scaled by fraction so 50/50 → +7.5%, 0/all-same → +0%.
+_SENT_RESONANCE_PEAK = 0.8
+_CONTROVERSY_BONUS_MAX = 0.15
+
+
 def _stable_seed(*parts: str) -> int:
     """Deterministic 32-bit seed from string parts.
 
@@ -128,15 +146,19 @@ def _visibility_factor(current_round: int, post_round: int) -> float:
 
 
 def _sentiment_resonance(sentiment: float) -> float:
-    """Bell curve peaked at |s|=0.7. Tepid (~0) and bot-extreme (~1) both damp.
+    """Bell curve peaked at |s|=_SENT_RESONANCE_PEAK. Tepid (~0) damps;
+    saturating-extreme (~1) damps less than before.
 
-    resonance(0.0) ≈ 0.46, resonance(0.7) = 1.0, resonance(1.0) ≈ 0.85.
-    Real social-media engagement skews to opinionated takes — but the
-    most-extreme posts read as bot-like and underperform genuine heat.
+    With peak=0.8 (T1, 2026-05-02): resonance(0.0)≈0.44, resonance(0.5)≈0.82,
+    resonance(0.7)≈0.98, resonance(0.8)=1.00, resonance(1.0)≈0.91. Pre-T1 the
+    peak was 0.7 with resonance(1.0)≈0.82 and resonance(0.0)≈0.48 — the shift
+    rewards divisive/extreme takes (real social-media engagement bias) while
+    leaving the tepid baseline almost unchanged. The bot-like ceiling at
+    |s|=1.0 still damps slightly relative to the peak (0.91 < 1.0).
     """
     s = max(0.0, min(1.0, abs(sentiment)))
     sigma = 0.35
-    return 0.4 + 0.6 * math.exp(-((s - 0.7) ** 2) / (2 * sigma ** 2))
+    return 0.4 + 0.6 * math.exp(-((s - _SENT_RESONANCE_PEAK) ** 2) / (2 * sigma ** 2))
 
 
 def _text_quality(text: str) -> float:
@@ -253,12 +275,48 @@ def attach_engagement(
     Public symbol so main.py can re-derive engagement at replay time
     (CONTRACTS §24 — pre-v6 sims get engagement signal at replay for free,
     deterministic per sim_id).
+
+    T1 (2026-05-02): post-pass controversy multiplier — posts whose direct
+    children disagree (opposite sentiment sign) get up to
+    +_CONTROVERSY_BONUS_MAX extra like_count. Posts with <2 children get no
+    bonus. Pure function of existing post sentiments — NO new RNG, replay
+    parity preserved (L22). Modest cap (15%) keeps P6 calibration intact —
+    a horrifying-scenario sim still skews negative; this only re-orders
+    posts WITHIN a sim so divisive takes float higher than bland ones.
     """
+    # First pass: deterministic base like_count + reply_count.
     for p in posts:
         p["like_count"] = _compute_like_count(
             sim_id=sim_id, post=p, current_round=current_round, audience=audience
         )
         p["reply_count"] = _compute_reply_count(p, posts)
+
+    # Second pass: controversy multiplier. Build a parent → children index
+    # once, then for each post count direct children whose sentiment sign
+    # opposes the post's. Multiply base like_count by (1 + frac × cap).
+    by_parent: dict[Any, list[dict[str, Any]]] = {}
+    for c in posts:
+        by_parent.setdefault(c.get("parent"), []).append(c)
+    for p in posts:
+        children = by_parent.get(p.get("id"), [])
+        if len(children) < 2:
+            continue
+        post_sent = float(p.get("sentiment", 0.0) or 0.0)
+        if post_sent == 0:
+            continue  # neutral parent has no "opposite sign" by definition.
+        post_sign = 1 if post_sent > 0 else -1
+        opposite = 0
+        for c in children:
+            cs = float(c.get("sentiment", 0.0) or 0.0)
+            if cs == 0:
+                continue
+            if (1 if cs > 0 else -1) != post_sign:
+                opposite += 1
+        if opposite == 0:
+            continue
+        factor = opposite / len(children)
+        multiplier = 1.0 + factor * _CONTROVERSY_BONUS_MAX
+        p["like_count"] = int(round(p["like_count"] * multiplier))
 
 
 # ---------------------------------------------------------- archetype voices
