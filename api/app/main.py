@@ -127,8 +127,15 @@ class SimulateStartRequest(BaseModel):
     # When true, the swarm runs one extra Gemini call with google_search
     # grounding before the rounds, so reactions are anchored to recent
     # real-world facts the swarm model would otherwise miss. Adds +1 to the
-    # per-sim budget (93/100 worst case at rounds=15).
+    # per-sim budget (93/100 worst case at rounds=15; 94/100 alongside Z1
+    # persona genesis).
     web_grounding: bool = False
+    # Z1 / v7 (CONTRACTS §27): persona pool size for the agentic engine.
+    # Optional and additive — only takes effect when ECHO_ENGINE_VERSION="v7"
+    # (server-side check in swarm.run_simulation). v6 callers may include this
+    # field freely; the server ignores it. Range [30, 100] enforced here so
+    # out-of-range bodies fail with HTTP 422 before any state is persisted.
+    persona_count: int | None = Field(default=None, ge=30, le=100)
 
 
 class SimulateStartResponse(BaseModel):
@@ -324,6 +331,11 @@ def simulate_start(
         stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
 
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
+    # Persist both feature flags on the sim row so /simulate/stream can plumb
+    # them through to run_simulation without an extra request body.
+    #   - web_grounding: enables the google_search pre-call (default 0).
+    #   - persona_count: Z1 / v7 persona pool size; NULL for v6 sims (column
+    #     added by db.init_db migration).
     insert_simulation(
         sim_id,
         uid,
@@ -332,6 +344,7 @@ def simulate_start(
         req.rounds,
         mode=req.mode,
         web_grounding=req.web_grounding,
+        persona_count=req.persona_count,
     )
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
@@ -360,8 +373,18 @@ async def simulate_stream(
     draft = sim["draft"]
     rounds = int(sim["rounds"])
     # Stored as INTEGER 0/1 in SQLite — cast to bool. Defensive default for
-    # rows written before the migration ran.
+    # rows written before the web_grounding migration ran.
     web_grounding = bool(sim.get("web_grounding") or 0)
+    # Z1 / v7: surface the persisted persona_count (NULL for v6 sims). The
+    # column was added by an idempotent ALTER TABLE migration, so older sim
+    # rows transparently read back as None here.
+    persona_count_raw = sim.get("persona_count") if isinstance(sim, dict) else None
+    persona_count: int | None = (
+        int(persona_count_raw)
+        if isinstance(persona_count_raw, int)
+        or (isinstance(persona_count_raw, str) and persona_count_raw.isdigit())
+        else None
+    )
 
     async def event_gen():
         try:
@@ -372,6 +395,7 @@ async def simulate_stream(
                 rounds=rounds,
                 mode=sim_mode,
                 web_grounding=web_grounding,
+                persona_count=persona_count,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})

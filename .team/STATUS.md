@@ -29,6 +29,7 @@ Updated by each agent after every meaningful task. One line per agent.
 | frontend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 07:00 | R2 done (commit 37335b0) — parent-child tree rendering with level-1 indent + vertical thread line; FLIP-based engagement-DESC re-sort animation (600ms cubic-bezier, "thread settles" vibe) on report-pending phase; TweetCard drops cosmetic mulberry32, consumes wire like_count/reply_count with growth-detected heart-pop. 8/8 Chrome MCP verifications, GIF captured at ~/Downloads/r2_engagement_sort.gif (2.7MB, 14s). 213 posts initial render in 265ms. Despawned. |
 | frontend-engineer-9 (opus, general-purpose) | ✅ done | 2026-05-02 07:30 | S1 done (commit 79109b9) — inline report panel: extracted ReportBody + ReportSidePanel, /simulating phase machine adds "ready" (no more redirect), subtle fullscreen icon top-right, /history click → /simulating replay. 10/10 Chrome MCP verifications, GIF at ~/Downloads/s1_inline_report.gif (5.3MB, 27 frames). Despawned. |
 | backend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 07:35 | T1 done (commit 36e726a) — minor divisive-content bias: `_sentiment_resonance` peak 0.7→0.8 (extreme posts closer to peak, |s|=1.0 lifts +0.094); attach_engagement post-pass controversy multiplier (≤+15% on posts whose ≥2 children disagree in sign). Module-top constants `_SENT_RESONANCE_PEAK` + `_CONTROVERSY_BONUS_MAX` for dialing. 4/4 scenarios verified — P6 calibration intact (Canada -0.494, Notion +0.135, schools -0.215, athletes -0.089). Determinism preserved. Despawned. |
+| backend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 08:25 | Z1 done (commit b384005) — persona genesis (`api/app/persona_genesis.py`) + DB persistence. Single Gemini-3 thinking call generates rich personas (name, handle, archetype, audience, bio, profession, hot_buttons) with diversity guardrails. 9/9 verifications + 5 personas confirmed distinct (Florence/London/Phoenix/Atlanta/SF, ages 24-70s, 5 different professions). v6 engine still drives sim. Caveats: live `api/echo.db` was pre-auth-migration; agent moved aside as `echo.db.bak.preZ1` and let `init_db` rebuild clean (history recoverable via small migration). uvicorn requires `FIREBASE_AUTH_DISABLED=1` shell-override for local dev. Despawned. |
 
 ## Phase tracker
 
@@ -57,6 +58,13 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **R2** — indented thread tree + FLIP engagement-DESC re-sort (commit 37335b0, pushed). 8/8 Chrome MCP verifications + GIF.
 - [x] **S1** — Inline report panel + subtle fullscreen toggle (commit 79109b9, pushed). 10/10 Chrome MCP verifications + GIF (~/Downloads/s1_inline_report.gif).
 - [x] **T1** — Minor divisive-content bias in engagement algorithm (commit 36e726a, pushed). 4/4 scenarios verified, P6 realism preserved.
+- [ ] **Z (Agentic Swarm Redesign — Crowd v7)** — per-persona LLM agents (vs 6-archetype-batched). Plan: `~/.claude/plans/melodic-mixing-sunset.md`.
+  - [x] **Z0** — CONTRACTS v7 §§25-30 LOCKED (commit 1da6277, pushed)
+  - [x] **Z1** — Persona genesis + DB persistence (commit b384005, pushed). v6 engine still drives sim. DB rebuilt clean (.bak.preZ1 preserves 67 prior sims; recoverable via user_id migration).
+  - [ ] **Z2** — Engine rewrite (per-persona-per-round LLM calls); the big one. Gated behind ECHO_ENGINE_VERSION=v7.
+  - [ ] **Z3** — Frontend persona surfacing (avatar bio tooltip; persona panel)
+  - [ ] **Z4** — Tuning + LEARNINGS (lead)
+  - [ ] **Z5** — Ship
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 

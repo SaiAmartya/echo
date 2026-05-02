@@ -55,9 +55,19 @@ GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-
 # text (response_schema is incompatible with tools=[google_search]).
 GEMINI_GROUNDING_MODEL = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-3-flash-preview")
 # Q1 (2026-05-02): rounds=15 needs 6 archetypes × 15 + 1 analysis + 1 report = 92 calls.
+# Z1 (2026-05-02): v7 adds 1 genesis call upfront → 93 calls. Still under cap.
 MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "100"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
+
+# Z1 / v7 (CONTRACTS §29): engine version flag. "v6" = current archetype-batched
+# engine (default). "v7" = agentic per-persona engine (Z2). Z1 only adds the
+# upfront persona-genesis call when v7 is set; the round loop is unchanged
+# until Z2 lands. Default stays "v6" so existing behavior is preserved.
+ECHO_ENGINE_VERSION = os.environ.get("ECHO_ENGINE_VERSION", "v6").strip().lower()
+# Z1 default persona pool size (range [30, 100] enforced at the request boundary).
+# Used when v7 + persona_count omitted. Plan #2.
+ECHO_DEFAULT_PERSONA_COUNT = int(os.environ.get("ECHO_DEFAULT_PERSONA_COUNT", "50"))
 
 PER_CALL_TIMEOUT = 10.0
 # Thinking-model calls: longer ceiling (5-20s typical, occasional 30s+ on
@@ -1215,12 +1225,19 @@ async def run_simulation(
     client: Any | None = None,
     mode: str = "business",
     web_grounding: bool = False,
+    persona_count: int | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Async generator yielding SSE event dicts for one full simulation.
 
     Caller persists `event: round` payloads + the final analysis. On any
     terminal exception we yield an `event: error` with one of the
     CONTRACTS.md §5 error codes — never re-raise into the SSE handler.
+
+    Z1 / v7 (CONTRACTS §§25-30): when ECHO_ENGINE_VERSION="v7", we run the
+    persona-genesis call upfront and persist the rich pool to the personas
+    table BEFORE the round loop. The round loop still uses the v6
+    archetype-batched path until Z2 lands — the genesis output is unused
+    by the engine in Z1, but available to /history, debugging, and Z2.
     """
     if client is None:
         client = _make_client()
@@ -1242,6 +1259,8 @@ async def run_simulation(
     # Web-grounding pre-call: one Gemini call that searches the live web for
     # context the per-archetype calls would otherwise miss. Failures are
     # swallowed inside _fetch_web_context so the sim still runs ungrounded.
+    # Runs BEFORE persona genesis so the v7 genesis prompt could later read
+    # web_context too if Z2 wants it (Z1 doesn't yet).
     web_context = ""
     if web_grounding:
         try:
@@ -1255,6 +1274,49 @@ async def run_simulation(
         except Exception:  # noqa: BLE001
             log.exception("sim %s: web_grounding pre-call crashed — proceeding ungrounded", sim_id)
             web_context = ""
+
+    # Z1 / v7: persona genesis. Runs ONCE upfront, before round 1. Counts as
+    # 1 call against the per-sim budget. v6 path is untouched: when
+    # ECHO_ENGINE_VERSION != "v7" we never even import persona_genesis. Plan
+    # constraint: Z1 is additive — the round loop below consumes
+    # `build_persona_pool` (the v6 200-name pool), not the rich genesis pool.
+    # Z2 will swap that. Failures inside generate_persona_pool fall through
+    # to the deterministic fallback (and persist that), so the sim still
+    # completes.
+    if ECHO_ENGINE_VERSION == "v7" and persona_count is not None:
+        # Defer-import keeps swarm.py importable when persona_genesis is
+        # absent (e.g. unit tests stubbing the module).
+        from .persona_genesis import generate_persona_pool  # noqa: WPS433
+        from . import db as _db  # noqa: WPS433 — local-only persistence hook
+
+        try:
+            pool = await generate_persona_pool(
+                audience=audience,
+                sim_id=sim_id,
+                count=int(persona_count),
+                client=client,
+                budget=budget,
+            )
+        except BudgetExceededError:
+            # Surface to the wallclock/error-mapping layer like any other
+            # budget violation — we did not even reach round 1.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Genesis is best-effort in Z1. If something exotic blows up
+            # outside the function's own try/except (e.g. OOM during
+            # validation), don't crash the sim — just log and fall back to
+            # an empty pool. Z2 will tighten this; for Z1 the v6 round loop
+            # doesn't depend on the pool anyway.
+            log.exception("persona genesis crashed for %s: %r", sim_id, exc)
+            pool = []
+
+        if pool:
+            try:
+                _db.insert_personas(sim_id, pool)
+            except Exception as exc:  # noqa: BLE001
+                # Persistence failures are loud but non-fatal — Z2 will
+                # re-read from DB, but Z1 doesn't depend on it. Log + move on.
+                log.exception("persona persistence failed for %s: %r", sim_id, exc)
 
     async def _inner() -> AsyncIterator[dict[str, Any]]:
         for round_n in range(1, rounds + 1):
