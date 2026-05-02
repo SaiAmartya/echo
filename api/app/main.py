@@ -42,6 +42,7 @@ from .swarm import (
     ReportSimNotFoundError,
     default_audience_archetypes,
     generate_report,
+    get_report_lock,
     run_simulation,
 )
 
@@ -366,20 +367,16 @@ def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
         raise _bad(500, "internal_error", "history read failed")
 
 
-# v3 (CONTRACTS §12, §14): per-sim concurrency guard for /report.
-# Process-local — fine for single-worker uvicorn. Multi-worker deployments
-# would need a DB-backed advisory lock, but the hackathon stack is single-proc.
-_REPORT_LOCKS: dict[str, asyncio.Lock] = {}
-_REPORT_LOCKS_GUARD = asyncio.Lock()
+# v3 (CONTRACTS §12, §14): per-sim concurrency guard for /report lives in
+# swarm.py so the auto-report fire-and-forget triggered at end-of-sim AND this
+# HTTP handler share one mutex per sim_id. See `swarm.get_report_lock`.
 
-
-async def _get_report_lock(sim_id: str) -> asyncio.Lock:
-    async with _REPORT_LOCKS_GUARD:
-        lock = _REPORT_LOCKS.get(sim_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            _REPORT_LOCKS[sim_id] = lock
-        return lock
+# Wait this long for a sim's /report mutex before giving up and returning 409.
+# Tuning: a thinking-model call typically lands in 5–20s, with rare 30s+
+# excursions on level=high. 30s is the goldilocks ceiling — long enough to
+# absorb the in-flight call's natural finish, short enough that the
+# Next.js fetch retry UX still feels responsive.
+_REPORT_LOCK_TIMEOUT = 30.0
 
 
 @app.post("/report", response_model=ReportResponse)
@@ -391,7 +388,8 @@ async def report(
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
 
-    # Cache hit path: cheap return when not regenerating.
+    # Cache hit path: cheap return when not regenerating. Even on a multi-click
+    # race, the second caller short-circuits here once the first persists.
     if not regenerate:
         cached = get_report(simulation_id)
         if cached is not None:
@@ -402,15 +400,24 @@ async def report(
                 # through to regenerate rather than 500.
                 log.warning("/report cached row malformed for %s: %r — regenerating", simulation_id, exc)
 
-    lock = await _get_report_lock(simulation_id)
-    if lock.locked():
-        # Another /report call for this sim is in flight. Don't queue — let
-        # the client decide whether to retry. (The frontend can poll.)
-        raise _bad(409, "report_pending", "a report is already being generated for this simulation")
+    # v3 race fix: rather than 409-ing immediately when the per-sim lock is
+    # held, *wait* for it (cap at _REPORT_LOCK_TIMEOUT). The first caller does
+    # the thinking-model call; the second caller wakes up, re-checks the cache
+    # inside the lock, and returns the freshly persisted row — so the user gets
+    # a successful report instead of an error and we spend exactly one Gemini
+    # call. Verified against Python 3.14.4 asyncio docs (May 2026):
+    # asyncio.Lock has no timeout kwarg; wrap acquire() in asyncio.wait_for().
+    lock = await get_report_lock(simulation_id)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_REPORT_LOCK_TIMEOUT)
+    except asyncio.TimeoutError:
+        # Lock held longer than the safety ceiling — likely a stuck thinking
+        # call. Surface 409 so the frontend can offer a retry.
+        raise _bad(409, "report_pending", "report still generating; try again shortly")
 
-    async with lock:
+    try:
         # Double-check cache inside the lock — a competing call may have just
-        # finished and persisted while we were waiting on the guard.
+        # finished and persisted while we were waiting to acquire.
         if not regenerate:
             cached = get_report(simulation_id)
             if cached is not None:
@@ -443,14 +450,13 @@ async def report(
             # /report call will just regenerate. Log loud.
             log.exception("/report upsert failed for %s: %r", simulation_id, exc)
 
-        # Re-read so `generated_at` reflects the DB-stamped time on cache hits.
-        # (Inline call uses the in-memory payload; downstream reads of /report
-        # see the persisted timestamp which may differ by ms.)
         try:
             return ReportResponse(**payload)
         except Exception as exc:  # noqa: BLE001
             log.exception("/report response shape invalid for %s: %r", simulation_id, exc)
             raise _bad(500, "internal_error", "report response shape invalid")
+    finally:
+        lock.release()
 
 
 @app.get("/simulate/replay", response_model=ReplayResponse)

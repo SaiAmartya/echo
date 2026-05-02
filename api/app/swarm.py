@@ -775,6 +775,16 @@ async def run_simulation(
             "event": "_analysis",  # sentinel — main.py persists then emits done
             "data": analysis,
         }
+        # v3 (CONTRACTS §12): auto-generate the full report at end of every sim.
+        # Fire-and-forget — does NOT block the SSE done event. The thinking-
+        # model call adds 1 to per-sim spend (≤32 typical, well under 40 cap).
+        # `schedule_auto_report` retains a strong ref and acquires the per-sim
+        # /report mutex internally so a user-click mid-flight cleanly blocks
+        # then picks up the cache. Failures are logged inside the helper.
+        try:
+            schedule_auto_report(sim_id)
+        except Exception:  # noqa: BLE001 — must never affect the sim done path
+            log.exception("auto-report: failed to schedule for %s", sim_id)
         yield {
             "event": "done",
             "data": {"simulation_id": sim_id},
@@ -1263,6 +1273,95 @@ def _format_thread_for_report(posts: list[dict[str, Any]]) -> str:
             f"{(p.get('text') or '').strip()}"
         )
     return "\n".join(lines)
+
+
+# --- Per-sim /report mutex --------------------------------------------------
+# Process-local — fine for single-worker uvicorn (the hackathon stack is
+# single-proc). Lives in swarm.py so BOTH the /report HTTP handler AND the
+# fire-and-forget auto-generation triggered at end-of-sim share one mutex per
+# sim_id. That coexistence is what makes "user clicks See full report while
+# auto-task is mid-flight" safe: the user's request waits on the lock, then
+# returns the cache row the auto-task just wrote.
+#
+# Verified asyncio semantics (Python 3.14.4 docs, May 2026):
+#   * asyncio.Lock.acquire() is FIFO-fair.
+#   * Locks/synchronization primitives don't accept timeout kwargs — wrap with
+#     asyncio.wait_for() (TimeoutError on expiry).
+#   * asyncio.create_task() requires the caller to hold a strong reference;
+#     otherwise GC may cancel mid-flight. We retain refs in
+#     `_BACKGROUND_REPORT_TASKS` and prune via add_done_callback.
+_REPORT_LOCKS: dict[str, asyncio.Lock] = {}
+_REPORT_LOCKS_GUARD: asyncio.Lock | None = None
+_BACKGROUND_REPORT_TASKS: set[asyncio.Task[Any]] = set()
+
+
+async def get_report_lock(sim_id: str) -> asyncio.Lock:
+    """Return the per-sim asyncio.Lock for /report serialization.
+
+    Lazy-creates the lock on first call. The guard lock is itself
+    lazy-initialised so it binds to the running event loop, not import-time.
+    """
+    global _REPORT_LOCKS_GUARD
+    if _REPORT_LOCKS_GUARD is None:
+        _REPORT_LOCKS_GUARD = asyncio.Lock()
+    async with _REPORT_LOCKS_GUARD:
+        lock = _REPORT_LOCKS.get(sim_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _REPORT_LOCKS[sim_id] = lock
+        return lock
+
+
+async def _safe_generate_report(sim_id: str) -> None:
+    """Fire-and-forget end-of-sim auto-report.
+
+    Acquires the same per-sim mutex used by POST /report so a user-click
+    arriving mid-flight blocks on the lock and falls through to the cache
+    on second-acquire (no duplicate thinking-model spend). Never raises —
+    failures are logged with `log.exception` so an upstream error never
+    affects the SSE `done` path or the simulation's persisted state.
+    """
+    # Local import — avoids any circular import risk if db ever grew an
+    # import from swarm (it doesn't today).
+    from .db import get_report as _db_get_report
+    from .db import upsert_report as _db_upsert_report
+
+    try:
+        lock = await get_report_lock(sim_id)
+        async with lock:
+            # Skip if a report already exists (e.g. user pre-clicked, or a
+            # prior auto-run succeeded). Keeps cost at +1 per sim, max.
+            try:
+                if _db_get_report(sim_id) is not None:
+                    log.info("auto-report: cached row exists for %s — skipping", sim_id)
+                    return
+            except Exception:  # noqa: BLE001 — cache read failure shouldn't block generation
+                log.exception("auto-report: cache check failed for %s", sim_id)
+
+            payload = await generate_report(sim_id)
+            try:
+                _db_upsert_report(sim_id, payload, payload.get("model", GEMINI_ANALYSIS_MODEL))
+                log.info("auto-report: persisted for %s", sim_id)
+            except Exception:  # noqa: BLE001 — log + swallow; HTTP /report can retry
+                log.exception("auto-report: upsert_report failed for %s", sim_id)
+    except Exception:  # noqa: BLE001 — top-level guard, must never escape
+        log.exception("auto-report: generation failed for %s", sim_id)
+
+
+def schedule_auto_report(sim_id: str) -> asyncio.Task[None]:
+    """Schedule a fire-and-forget auto-report for `sim_id`.
+
+    Returns the Task so the caller can also retain a reference if it likes,
+    but the function itself adds the task to the module-level
+    `_BACKGROUND_REPORT_TASKS` set and prunes on completion — no caller
+    bookkeeping required. Per Python 3.14 docs (May 2026), holding a strong
+    reference is mandatory or the loop's weakref to the task may let GC
+    cancel it mid-flight.
+    """
+    task = asyncio.create_task(_safe_generate_report(sim_id))
+    _BACKGROUND_REPORT_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_REPORT_TASKS.discard)
+    return task
 
 
 async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str, Any]:
