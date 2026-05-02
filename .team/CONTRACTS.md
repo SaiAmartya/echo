@@ -479,3 +479,15 @@ All other errors from v1 §5 still apply. `unknown_audience` (404) only fires wh
 ---
 
 **v4 LOCKED — 2026-05-02.** All v1 + v2 + v3 shapes preserved. Implementations land in Phase 2.
+
+---
+
+## v5 (LOCKED — 2026-05-02): rounds range expanded
+
+### § 20. POST /simulate/start — additive update over v4 §16
+
+Request `rounds` field range changes from `[3, 6]` to `[5, 15]`.
+- Existing FE sending rounds in [3, 4] now receives 422 validation error.
+- Migration check: confirm no production rows depend on rounds < 5 before deploy.
+  Hackathon-stage: pre-Q1 sims with rounds<5 remain in DB; only NEW sims are constrained.
+- Default unchanged (FE picks its own default; backend just enforces range).

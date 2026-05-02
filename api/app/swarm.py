@@ -48,7 +48,8 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 # Verified `gemini-3-flash-preview` via Context7 + ai.google.dev/gemini-api/docs/gemini-3
 # (2026-05-02): single model id, thinking enabled via `thinking_config={"thinking_level":...}`.
 GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-preview")
-MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "40"))
+# Q1 (2026-05-02): rounds=15 needs 6 archetypes × 15 + 1 analysis + 1 report = 92 calls.
+MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "100"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
 

@@ -109,7 +109,11 @@ class SimulateStartRequest(BaseModel):
     # Context7 pydantic 2.x docs 2026-05-02).
     mode: Literal["business", "hypothetical"] = "business"
     audience_id: str | None = Field(default=None, pattern=_AUDIENCE_ID_PATTERN)
-    rounds: int = Field(default=5, ge=3, le=6)
+    # v5 (CONTRACTS §20, 2026-05-02): rounds range expanded [3,6] → [5,15] to
+    # support the user-requested deeper-discourse mode. Per-sim budget cap was
+    # raised in lock-step (swarm.MAX_LLM_CALLS 40 → 100) to fit
+    # 6 archetypes × 15 rounds + 1 analysis + 1 report = 92 calls.
+    rounds: int = Field(default=5, ge=5, le=15)
 
 
 class SimulateStartResponse(BaseModel):
