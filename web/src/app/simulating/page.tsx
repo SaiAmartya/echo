@@ -2,13 +2,14 @@
 // 03 — Rounds (live swarm thread, driven by /simulate/stream SSE)
 // Ported from design/echo/project/lib/views.jsx (View03_Rounds)
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Frame, StepIndicator } from "@/components/Shell";
 import { Button, Icon } from "@/components/ui/Primitives";
 import { SEED_DRAFT, SwarmThread } from "@/components/SwarmThread";
 import {
   api,
+  ApiError,
   type RoundEvent,
   type ServerPost,
   type SimulateStartResponse,
@@ -35,10 +36,16 @@ const DEFAULT_ROUNDS = 5;
 // in the FE so a fast model (or a future optimization) doesn't collapse the
 // signature visualization into a blink. See debugger commit message for why.
 const MIN_ROUND_VISIBLE_MS = 1200;
-// After receiving `event: done`, wait this long before navigating to /results
-// so the user sees the completed swarm settle. Without this the redirect fires
-// the same frame the final round paints.
-const DONE_LINGER_MS = 2000;
+// After the report POSTs back 200, wait this long before navigating to /report
+// so the spinner doesn't snap-cut to a dense report page — gives the user a
+// moment of "ok, that's done" before the route flip.
+const REPORT_READY_LINGER_MS = 500;
+
+// Q2 — phase machine for the post-SSE-done flow.
+// streaming → SSE in flight (or replay rendering)
+// report-pending → SSE done; POST /report kicked; waiting for backend
+// report-failed → /report errored (gemini_unavailable / network); user can retry
+type Phase = "streaming" | "report-pending" | "report-failed";
 
 interface ErrorState {
   code: string;
@@ -87,6 +94,7 @@ function SimulatingInner() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<ErrorState | null>(null);
   const [draft, setDraft] = useState(SEED_DRAFT);
+  const [phase, setPhase] = useState<Phase>("streaming");
   // Default to "business" so the existing @notion attribution keeps appearing
   // for legacy / unset cases. Live mode hydrates from sessionStorage; replay
   // mode overwrites from the /simulate/replay payload.
@@ -103,6 +111,11 @@ function SimulatingInner() {
   const lastAppliedAtRef = useRef(0);
   const drainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Q2 — guard the report POST against component unmount and re-mount races
+  // (StrictMode dev double-mount, route changes mid-flight). Backend handles
+  // duplicate POSTs idempotently (per L11 / v3 §12 lock+cache pattern), but
+  // we don't want a stale response setting state on a dead component.
+  const reportInFlightRef = useRef(false);
 
   // Pull initial total rounds from sessionStorage if present (so the topbar
   // doesn't briefly say "of 5" when the user picked 3). Skipped in replay mode
@@ -115,6 +128,52 @@ function SimulatingInner() {
     setMode(loadMode());
   }, [isReplay]);
 
+  // Q2 — kick the /report POST and gate the redirect on its 200. Memoized so
+  // the Retry button can re-fire it from the failed state without remounting
+  // the whole effect. `cancelled` is captured per call to keep the latest
+  // attempt's response from clobbering state if the user navigates away.
+  const kickReport = useCallback(
+    (simId: string) => {
+      if (reportInFlightRef.current) return;
+      reportInFlightRef.current = true;
+      setPhase("report-pending");
+
+      let cancelled = false;
+      void (async () => {
+        try {
+          await api.generateReport({ simulation_id: simId });
+          if (cancelled) return;
+          // Brief settle pause so the spinner doesn't hard-cut to /report.
+          if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+          redirectTimerRef.current = setTimeout(() => {
+            router.push(`/report?id=${encodeURIComponent(simId)}`);
+          }, REPORT_READY_LINGER_MS);
+        } catch (e) {
+          if (cancelled) return;
+          // Surface anything the user can usefully retry (502 gemini, network,
+          // generic) as report-failed. The component renders a Retry button.
+          // 409 report_pending shouldn't happen here in practice (we only POST
+          // once after done), but if it does, treat it as success-pending and
+          // navigate — backend lock + cache means /report?id will resolve.
+          if (e instanceof ApiError && e.code === "report_pending") {
+            redirectTimerRef.current = setTimeout(() => {
+              router.push(`/report?id=${encodeURIComponent(simId)}`);
+            }, REPORT_READY_LINGER_MS);
+            return;
+          }
+          setPhase("report-failed");
+        } finally {
+          reportInFlightRef.current = false;
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    },
+    [router],
+  );
+
   useEffect(() => {
     if (!id) {
       setError({ code: "bad_request", message: "Missing simulation id." });
@@ -126,16 +185,20 @@ function SimulatingInner() {
     queueRef.current = [];
     doneSeenRef.current = false;
     lastAppliedAtRef.current = 0;
+    reportInFlightRef.current = false;
     if (drainTimerRef.current) clearTimeout(drainTimerRef.current);
     if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
 
     // ---- Shared paced-ingest machinery (used by both live SSE and replay).
-    // In live mode the finish step closes the EventSource and schedules a
-    // 2s linger before redirecting to /results. In replay mode we just settle
-    // into the "done" state and let the user press "Back to results" — no
-    // redirect, nothing to close.
+    // Live mode: when the queue drains and `done` was seen, we transition into
+    // the report-pending phase (Q2): keep the thread visible, render a status
+    // panel below it, POST /report, and only redirect after the backend
+    // confirms the report exists. The old 2s pre-redirect linger is gone —
+    // the report POST IS the linger now (and it usually beats 2s anyway, since
+    // run_simulation fires a fire-and-forget /report at end-of-sim per L11).
+    // Replay mode: settle into done state and let the user nav back manually;
+    // no report POST.
     const finish = () => {
-      if (redirectTimerRef.current) return;
       setRunning(false);
       setDone(true);
       if (sourceRef.current) {
@@ -143,9 +206,7 @@ function SimulatingInner() {
         sourceRef.current = null;
       }
       if (!isReplay) {
-        redirectTimerRef.current = setTimeout(() => {
-          router.push(`/report?id=${encodeURIComponent(id)}`);
-        }, DONE_LINGER_MS);
+        kickReport(id);
       }
     };
 
@@ -283,7 +344,7 @@ function SimulatingInner() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, router, isReplay]);
+  }, [id, router, isReplay, kickReport]);
 
   const onPause = () => {
     setRunning(false);
@@ -382,6 +443,59 @@ function SimulatingInner() {
             mode={mode}
           />
         </div>
+        {/* Q2 — report-readiness status panel. Lives below the SwarmThread,
+            above the footer, centered. Only renders for live sims after the
+            SSE done event; replay never enters report-pending. */}
+        {!isReplay && !error && (phase === "report-pending" || phase === "report-failed") && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+              padding: "12px 16px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              fontSize: 13,
+              color: "var(--fg-1)",
+            }}
+          >
+            {phase === "report-pending" ? (
+              <>
+                <span
+                  aria-hidden
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: 999,
+                    border: "2px solid var(--border-strong)",
+                    borderTopColor: "var(--fg-1)",
+                    animationName: "echo-spin",
+                    animationDuration: "0.8s",
+                    animationIterationCount: "infinite",
+                    animationTimingFunction: "linear",
+                  }}
+                />
+                <span style={{ color: "var(--fg-2)" }}>Analysis report generating…</span>
+              </>
+            ) : (
+              <>
+                <span style={{ color: "#f06c5a" }}>Report generation failed.</span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => id && kickReport(id)}
+                  disabled={!id}
+                >
+                  Retry report generation
+                </Button>
+              </>
+            )}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           {isReplay ? (
             <Button
@@ -401,7 +515,9 @@ function SimulatingInner() {
             >
               Pause
             </Button>
-          ) : (
+          ) : phase === "streaming" ? (
+            // Edge case: SSE errored or paused before done (so phase never
+            // advanced). Keep the legacy "See report" CTA available.
             <Button
               variant="primary"
               size="sm"
@@ -410,7 +526,7 @@ function SimulatingInner() {
             >
               See report
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
     </Frame>
