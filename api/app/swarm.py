@@ -70,6 +70,23 @@ GEMINI_GROUNDING_MODEL = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-3-flas
 ECHO_DEV_MODE = os.environ.get("ECHO_DEV_MODE", "0") == "1"
 _DEV_DIVIDER = 3 if ECHO_DEV_MODE else 1
 
+# G1 (CONTRACTS §§41-45): reaction-GIF feature flag. When False, all gif
+# plumbing no-ops (schema field omitted, prompt rule omitted, parser returns
+# None, aggregator threading skipped, rarity cap skipped). Default True on
+# the experimental/gif-reactions branch; off on main until the FE lands.
+ECHO_GIFS_ENABLED = os.environ.get("ECHO_GIFS_ENABLED", "1") == "1"
+
+# G1: canonical 25-tag enum for gif_reaction. Lowercase snake_case. The 25 tags
+# are the locked set per CONTRACTS §41 — FE renders each as emoji + a small CSS
+# animation. Reused across the response schema, parser validator, and prompt.
+GIF_REACTION_TAGS: tuple[str, ...] = (
+    "eye_roll", "popcorn", "mind_blown", "this_is_fine", "side_eye",
+    "slow_clap", "head_shake", "shrug", "thumbs_up", "thumbs_down",
+    "applause", "suspicious", "shocked", "deep_sigh", "mic_drop",
+    "facepalm", "laughing", "crying", "nervous", "bored",
+    "cheers", "point_up", "no_thanks", "thinking", "wave",
+)
+
 MAX_LLM_CALLS = max(50, int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "1200")) // _DEV_DIVIDER)
 # Z2: bumped 6 → 12 to absorb the per-persona fan-out. 50 personas at 12-wide
 # ≈ 4-5 batches per round; per-call latency ~1-3s on Flash-Lite. v6 round loop
@@ -801,6 +818,16 @@ _PERSONA_ACTION_SCHEMA: dict[str, Any] = {
     },
     "required": ["action"],
 }
+
+# G1: optionally extend schema with `gif_reaction` field. Guarded by the
+# ECHO_GIFS_ENABLED flag so flipping the flag off makes the field disappear
+# from the structured-output spec entirely (model won't be asked for it).
+if ECHO_GIFS_ENABLED:
+    _PERSONA_ACTION_SCHEMA["properties"]["gif_reaction"] = {
+        "type": "STRING",
+        "nullable": True,
+        "enum": list(GIF_REACTION_TAGS),
+    }
 
 
 # -------------------------------------------------------------- budget gate
@@ -1698,6 +1725,27 @@ def _build_persona_user_prompt(
         else ""
     )
 
+    # G1: optional reaction-GIF rule + JSON-schema line, gated by the flag.
+    # Folded into the prompt only when enabled so flag-off prompts are
+    # byte-identical to pre-G1 prompts (replay parity for old sims).
+    gif_format_line = (
+        '  "gif_reaction": <one of the 25 tags below> or null (default null),\n'
+        if ECHO_GIFS_ENABLED
+        else ""
+    )
+    gif_hard_rule = (
+        (
+            "- GIF rule: most reactions don't need a GIF. Only set "
+            "`gif_reaction` when the post would land harder with a small "
+            "reaction visual — eye_roll on a cynical take, popcorn on a "
+            "dogpile, mind_blown on a hot take, etc. Default to null. "
+            "Aim for ~1-in-10 posts having a GIF, not more. Pick from: "
+            f"[{', '.join(GIF_REACTION_TAGS)}] or null."
+        )
+        if ECHO_GIFS_ENABLED
+        else ""
+    )
+
     return (
         f"{header}"
         f"ROUND: {round_n} of {total_rounds}\n\n"
@@ -1709,7 +1757,9 @@ def _build_persona_user_prompt(
         '  "text": "<your reaction, 1-2 sentences, in your voice>" or null when skipping,\n'
         '  "replying_to": "<a post id from the feed above, e.g. p7>" or null when posting/skipping,\n'
         '  "sentiment": <-1.0..1.0> or null when skipping,\n'
-        '  "likes_given": ["<post id from feed>", ...] (max 5; empty array if you wouldn\'t like anything)\n'
+        '  "likes_given": ["<post id from feed>", ...] (max 5; empty array if you wouldn\'t like anything)'
+        f"{',' if ECHO_GIFS_ENABLED else ''}\n"
+        f"{gif_format_line}"
         "}\n\n"
         "DECISION GUIDANCE:\n"
         "- Most personas don't post EVERY round — `skip` is fine and realistic. "
@@ -1728,6 +1778,7 @@ def _build_persona_user_prompt(
         "anecdote, a wry comment, a frame, or a feeling — as if you just "
         "scrolled past this in your feed and reacted. Never write the word "
         "'hypothetical'."
+        + (("\n" + gif_hard_rule) if gif_hard_rule else "")
     )
 
 
@@ -1739,6 +1790,11 @@ class PersonaAction:
     replying_to: str | None
     sentiment: float | None
     likes_given: list[str]
+    # G1 (CONTRACTS §§41-45): optional reaction-GIF tag from the canonical
+    # 25-tag enum. None when flag disabled, when persona skipped, or when
+    # the LLM left it null (which should be the common case — most posts
+    # don't get a GIF). Validated against GIF_REACTION_TAGS in the parser.
+    gif_reaction: str | None = None
 
 
 # Z4 (lead 2026-05-02): defensive prefix strip. The model occasionally echoes
@@ -1925,6 +1981,18 @@ def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
             if isinstance(x, str) and x.strip():
                 likes_given.append(x.strip())
 
+    # G1: optional reaction-GIF tag. Validate against canonical enum;
+    # anything else (None, unknown tag, non-string) collapses to None so
+    # the FE never sees a tag it can't render.
+    gif_raw = obj.get("gif_reaction")
+    gif_reaction = (
+        gif_raw if isinstance(gif_raw, str) and gif_raw in GIF_REACTION_TAGS else None
+    )
+    # When persona skipped, no GIF is emitted (defensive — schema already
+    # only allows null on skip via prompt, but enforce here too).
+    if action == "skip":
+        gif_reaction = None
+
     return PersonaAction(
         persona_id=persona_id,
         action=action,
@@ -1932,6 +2000,7 @@ def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
         replying_to=replying_to,
         sentiment=sentiment,
         likes_given=likes_given,
+        gif_reaction=gif_reaction,
     )
 
 
@@ -2021,6 +2090,8 @@ def _aggregate_round_actions(
                     "replying_to": pa.replying_to,
                     "sentiment": pa.sentiment,
                     "likes_given": list(pa.likes_given),
+                    # G1: persist the gif tag for replay parity (None when flag off).
+                    "gif_reaction": (pa.gif_reaction or None) if ECHO_GIFS_ENABLED else None,
                 }
             )
             continue
@@ -2060,6 +2131,12 @@ def _aggregate_round_actions(
                 # so we can correlate post text style with assigned cadence
                 # in the round_event payload. Optional/None-tolerant on read.
                 "voice_cadence": persona.get("voice_cadence") or None,
+                # G1 (CONTRACTS §§41-45): optional reaction-GIF tag picked by
+                # the persona itself this round. None for most posts; the FE
+                # renders non-null tags as emoji + small CSS animation. When
+                # ECHO_GIFS_ENABLED is False the field is always None (parser
+                # short-circuits) so this is a defensive no-op then.
+                "gif_reaction": (pa.gif_reaction or None) if ECHO_GIFS_ENABLED else None,
             }
             post = {
                 "id": post_id,
@@ -2089,6 +2166,9 @@ def _aggregate_round_actions(
                 "replying_to": pa.replying_to,
                 "sentiment": pa.sentiment,
                 "likes_given": list(pa.likes_given),
+                # G1: persist gif_reaction so replay can re-render the same
+                # tag without re-running the LLM (CONTRACTS §28 parity).
+                "gif_reaction": (pa.gif_reaction or None) if ECHO_GIFS_ENABLED else None,
             }
         )
 
@@ -2097,6 +2177,37 @@ def _aggregate_round_actions(
         like_deltas = {k: v * _LIKE_DISPLAY_MULTIPLIER for k, v in like_deltas.items()}
 
     return new_posts, persistence_actions, like_deltas
+
+
+def _enforce_gif_rarity_cap(
+    posts: list[dict[str, Any]], *, max_ratio: float = 0.15
+) -> None:
+    """G1: cap the per-round share of posts carrying a gif_reaction.
+
+    Mutate-in-place: if more than `max_ratio` of posts in this round have a
+    non-null `agent.gif_reaction`, randomly null the surplus down to the cap.
+    Defends the cartoonish failure mode where the LLM gets enthusiastic and
+    decorates every post; per the prompt rule we want roughly 1-in-10.
+
+    Pure mutation on the input list — caller does not need to rebind.
+    Idempotent on already-capped lists. No-op when ECHO_GIFS_ENABLED is off
+    (every post already has gif_reaction == None).
+    """
+    if not posts:
+        return
+    gif_indices = [
+        i for i, p in enumerate(posts)
+        if (p.get("agent") or {}).get("gif_reaction")
+    ]
+    max_allowed = max(1, int(len(posts) * max_ratio))
+    if len(gif_indices) <= max_allowed:
+        return
+    import random  # local import — used only here, keeps module-top clean
+    to_null = random.sample(gif_indices, len(gif_indices) - max_allowed)
+    for i in to_null:
+        agent = posts[i].get("agent")
+        if isinstance(agent, dict):
+            agent["gif_reaction"] = None
 
 
 def _apply_v7_engagement(
@@ -2484,6 +2595,28 @@ async def run_simulation(
                 next_post_id=next_post_id,
                 known_post_ids=known_post_ids,
             )
+            # G1: rarity cap — even with the prompt rule, the LLM occasionally
+            # gets enthusiastic and decorates >half the posts in a round.
+            # Random-prune surplus down to ≤15% before persistence + SSE so
+            # both the wire shape and the persisted JSON respect the cap.
+            # No-op when ECHO_GIFS_ENABLED is off (no posts have gifs).
+            if ECHO_GIFS_ENABLED:
+                _enforce_gif_rarity_cap(new_posts, max_ratio=0.15)
+                # Mirror the cap into persistence_actions so replay matches.
+                # Build an id-set of posts that ended up null after the cap;
+                # a persistence_action is keyed by persona_id, so we resolve
+                # by matching persona_id → its post in new_posts (if any).
+                kept_gifs_by_persona: dict[str, str | None] = {}
+                for _p in new_posts:
+                    _aid = (_p.get("agent") or {}).get("id")
+                    if _aid is not None:
+                        kept_gifs_by_persona[_aid] = (_p.get("agent") or {}).get(
+                            "gif_reaction"
+                        )
+                for _pa in persistence_actions:
+                    _pid = _pa.get("persona_id")
+                    if _pid in kept_gifs_by_persona:
+                        _pa["gif_reaction"] = kept_gifs_by_persona[_pid]
             cumulative.extend(new_posts)
             # Z6: accumulate RAW like counts in the sidecar so the power-law
             # transform sees raw input each round (not the previously-amplified

@@ -193,6 +193,13 @@ class ReplayAgent(BaseModel):
     bio: str = ""
     profession: str | None = None
     hot_buttons: list[str] | None = None
+    # D1 (CONTRACTS §§37-40): per-persona cadence on the wire. Optional/null
+    # for v6 sims and pre-D1 v7 sims (additive — never required).
+    voice_cadence: str | None = None
+    # G1 (CONTRACTS §§41-45): optional reaction-GIF tag picked by the persona
+    # for this post. None for the vast majority of posts; FE renders non-null
+    # tags as emoji + small CSS animation. Pre-G1 replays read None here.
+    gif_reaction: str | None = None
 
 
 class ReplayPost(BaseModel):
