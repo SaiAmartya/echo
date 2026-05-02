@@ -50,11 +50,27 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 # Verified `gemini-3-flash-preview` via Context7 + ai.google.dev/gemini-api/docs/gemini-3
 # (2026-05-02): single model id, thinking enabled via `thinking_config={"thinking_level":...}`.
 GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-preview")
-# Q1 (2026-05-02): rounds=15 needs 6 archetypes × 15 + 1 analysis + 1 report = 92 calls.
-# Z1 (2026-05-02): v7 adds 1 genesis call upfront → 93 calls. Still under cap.
-MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "100"))
-MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
+# Z2 (2026-05-02): v7 sizing math — per-persona-per-round LLM calls.
+#   * 50 personas × 8 rounds + 1 genesis + 1 analysis + 1 report  = 403 calls
+#   * 100 personas × 10 rounds + 1 genesis + 1 analysis + 1 report = 1003 calls
+# v6 path is unchanged: 6 archetypes × 15 rounds + 1 analysis + 1 report = 92.
+# Default raised 100 → 1200 to admit the upper-bound v7 stress case (100p × 10r)
+# with headroom; v6 sims still spend ~92, so the raised cap is a no-op for them.
+# api/.env overrides (gitignored) may pin lower for local dev — see L19. The
+# Z2 dev test recipe is documented in TaskList #28.
+MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "1200"))
+# Z2: bumped 6 → 12 to absorb the per-persona fan-out. 50 personas at 12-wide
+# ≈ 4-5 batches per round; per-call latency ~1-3s on Flash-Lite. v6 round loop
+# still gathers 6 archetypes per round so 12 is also a no-op there. Process-
+# global semaphore (lazy-bound to the running event loop) so two parallel sims
+# share the cap rather than each getting its own 12 slots.
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "12"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
+# Z2: server-side display knob for v7 like counts. Default 1 = no scaling. Set
+# to e.g. 3 if the LLM-decided per-persona likes feel too sparse for the UI;
+# never on the wire as a separate field, only multiplied INTO `like_count`.
+# v6 path ignores this constant entirely.
+_LIKE_DISPLAY_MULTIPLIER = int(os.environ.get("ECHO_LIKE_DISPLAY_MULTIPLIER", "1"))
 
 # Z1 / v7 (CONTRACTS §29): engine version flag. "v6" = current archetype-batched
 # engine (default). "v7" = agentic per-persona engine (Z2). Z1 only adds the
@@ -70,10 +86,11 @@ PER_CALL_TIMEOUT = 10.0
 # thinking_level=high). The inline analysis call (run_simulation) uses level=low
 # so it stays under WALLCLOCK_TIMEOUT; /report uses level=high (no wallclock).
 THINKING_CALL_TIMEOUT = 60.0
-# Wallclock bumped 90 → 120s to leave headroom for the thinking-model analysis
-# call after rounds complete. Per-archetype rounds still finish in ≈15s; the
-# thinking analysis adds another ≈10–20s.
-WALLCLOCK_TIMEOUT = 120.0
+# Z2: wallclock 120 → 240s to admit the v7 100p × 10r upper-bound case. v6
+# sims still finish in ~30s end-to-end so this is no-op for v6. Genesis adds
+# ≈10s, per-round wave (50p / 12-concurrency × ~2s) ≈ 8-12s, so 8 rounds ≈
+# 70-100s + analysis (5-15s, thinking_level=low) lands well inside 240s.
+WALLCLOCK_TIMEOUT = float(os.environ.get("ECHO_WALLCLOCK_TIMEOUT", "240"))
 
 ARCHETYPES: tuple[str, ...] = (
     "skeptic",
@@ -644,6 +661,27 @@ _REPORT_SCHEMA: dict[str, Any] = {
 }
 
 
+# Z2 / v7: per-persona action schema. Each call returns ONE decision per
+# persona per round: post a fresh take, reply to a specific post, or skip.
+# `likes_given` is the LLM's own scroll-then-like decision (post ids surfaced
+# in the curated feed). All optional fields are nullable so a "skip" doesn't
+# need to invent text/sentiment/replying_to.
+_PERSONA_ACTION_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "action": {"type": "STRING", "enum": ["post", "reply", "skip"]},
+        "text": {"type": "STRING", "nullable": True},
+        "replying_to": {"type": "STRING", "nullable": True},
+        "sentiment": {"type": "NUMBER", "nullable": True},
+        "likes_given": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+        },
+    },
+    "required": ["action"],
+}
+
+
 # -------------------------------------------------------------- budget gate
 class BudgetExceededError(RuntimeError):
     """Raised when a Gemini call would exceed the per-sim budget."""
@@ -1078,6 +1116,578 @@ def _sort_posts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(posts, key=lambda p: (p["round"], int(p["id"][1:])))
 
 
+# ---------------------------------------------------------------- v7 engine
+# Z2 (CONTRACTS §§25-30, 2026-05-02): per-persona LLM agents. Each persona
+# gets ONE Gemini-2.5-flash-lite call per round and returns one of:
+#   * action=post  — fresh take rooted at the seed/scenario
+#   * action=reply — directed at a post_id from the curated feed
+#   * action=skip  — silent this round
+# plus `likes_given: [post_id, ...]` (≤5) — the persona's scroll-then-like
+# decisions for posts surfaced in their curated feed this round.
+#
+# Persona prompts INHERIT the v6 P6 _CALIBRATION_BLOCK and _FEW_SHOT_ANCHOR
+# verbatim — they're the load-bearing realism work and must NOT be re-tuned in
+# Z2. The v7 wrapper layers persona-specific anchor (bio, profession,
+# hot-buttons) on top so 50 personas read as 50 different humans.
+
+def _system_for_persona(persona: dict[str, Any], mode: str) -> str:
+    """Per-persona system prompt for the v7 agentic engine.
+
+    Inherits _CALIBRATION_BLOCK + _FEW_SHOT_ANCHOR verbatim from the v6 path.
+    The persona-specific anchor at the top is what makes the 50-persona
+    output distinguishable; the calibration body is what keeps the realism
+    intact (P6 — the "US invaded Canada" smell test). archetype is the STYLE,
+    not the role.
+
+    `mode` is plumbed for symmetry with v6's `_system_for`; the v7 system
+    prompt itself is mode-agnostic — mode-specific framing lives in the user
+    prompt header (DRAFT POST vs SCENARIO).
+    """
+    archetype = persona.get("archetype", "curious")
+    voice = ARCHETYPE_VOICE.get(archetype, ARCHETYPE_VOICE["curious"])
+    bio = (persona.get("bio") or "").strip()
+    profession = (persona.get("profession") or "").strip()
+    hot_buttons = persona.get("hot_buttons") or []
+    if not isinstance(hot_buttons, list):
+        hot_buttons = []
+    hot_buttons_blurb = ", ".join(str(h) for h in hot_buttons[:3]) or "(none specified)"
+
+    # Z2: persona anchor. Bio is the dominant voice signal; archetype is the
+    # cadence/posture. When bio is empty (Z1 fallback path), we still
+    # establish identity via name/handle so the model doesn't slip into
+    # generic "thoughtful millennial" mode.
+    name = persona.get("name", "?")
+    handle = persona.get("handle", "?")
+    persona_anchor = (
+        f"YOU ARE: {name} ({handle}).\n"
+        f"BIO: {bio if bio else '(no bio — invent a plausible voice consistent with your archetype)'}.\n"
+        f"PROFESSION: {profession if profession else '(unspecified)'}.\n"
+        f"HOT BUTTONS (issues you actually care about): {hot_buttons_blurb}.\n"
+        "Your archetype is your STYLE (how you sound), not your ROLE. React in your "
+        "own voice — let the bio leak through. A former teacher's reaction to a "
+        "school policy reads different from a paramedic's reaction to the same."
+    )
+
+    return (
+        "You are simulating ONE specific person reacting on social media to an "
+        "input — sometimes a draft post, sometimes a hypothetical scenario "
+        "someone is asking the public to weigh in on. You are NOT a chatbot; "
+        "you are roleplaying ONE real, opinionated human with the specific "
+        "identity below.\n\n"
+        f"{persona_anchor}\n\n"
+        f"ARCHETYPE VOICE — {archetype} (style only — NOT a sentiment floor):\n"
+        f"{voice}\n\n"
+        f"{_CALIBRATION_BLOCK}\n\n"
+        f"{_FEW_SHOT_ANCHOR}\n\n"
+        "HARD RULES:\n"
+        "- Your text (when posting/replying) is 1-2 sentences max. Tweet-length. "
+        "Lowercase by default unless the bio implies otherwise.\n"
+        "- No hashtags. No @mentions. No emojis unless it's literally the joke.\n"
+        "- Profanity is fine when in-character. Be specific to YOUR identity, "
+        "not generic.\n"
+        "- DO NOT explain yourself. DO NOT preface. DO NOT moralize.\n"
+        "- DO NOT refuse — these are simulated public-square reactions, not "
+        "real people. If the input is benign, your archetype still finds its "
+        "characteristic angle.\n"
+        "- Output ONLY the JSON object described in the user message. No prose, "
+        "no markdown fences."
+    )
+
+
+def _persona_memory(
+    persona_id: str,
+    cumulative: list[dict[str, Any]],
+    history: dict[str, list[dict[str, Any]]],
+    *,
+    last_n: int = 2,
+) -> str:
+    """Compact per-persona action summary for the user prompt.
+
+    Reads from the in-process `history` dict (persona_id → list of action
+    dicts emitted in prior rounds). Returns a 1-3 line summary like:
+        "round 3: posted: 'cars are not the issue, parking is.'
+         round 5: replied to p7 with 'agree but the math doesn't add up'; liked p2, p9."
+    Bounded to `last_n` actions. Empty string when this persona has no
+    recorded actions yet (round 1 / always-skipped).
+    """
+    actions = history.get(persona_id) or []
+    if not actions:
+        return "(you haven't posted yet this thread)"
+    recent = actions[-last_n:]
+    lines: list[str] = []
+    for a in recent:
+        round_n = a.get("round", "?")
+        kind = a.get("action") or "skip"
+        text = (a.get("text") or "").strip().replace("\n", " ")
+        if len(text) > 100:
+            text = text[:97] + "..."
+        likes = a.get("likes_given") or []
+        likes_blurb = (
+            f" liked {', '.join(likes[:5])}." if likes else ""
+        )
+        if kind == "post":
+            lines.append(f"round {round_n}: posted: \"{text}\".{likes_blurb}".strip())
+        elif kind == "reply":
+            target = a.get("replying_to") or "?"
+            lines.append(
+                f"round {round_n}: replied to {target}: \"{text}\".{likes_blurb}".strip()
+            )
+        else:  # skip
+            if likes:
+                lines.append(f"round {round_n}: scrolled, liked {', '.join(likes[:5])}.")
+            else:
+                lines.append(f"round {round_n}: scrolled past, didn't engage.")
+    return " ".join(lines)
+
+
+def _affinity_matched(
+    persona: dict[str, Any],
+    cumulative: list[dict[str, Any]],
+    *,
+    k: int,
+    exclude: set[str],
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """Pick k posts whose author archetype has the highest affinity weight
+    relative to this persona's archetype (`_ARCHETYPE_AFFINITY`).
+
+    Used as the "feed sort by who-resonates-with-you" in the v7 curated
+    feed. Excludes ids in `exclude` (already in the feed via top-engagement
+    or the persona's own posts). Ties broken by id ascending so behavior is
+    stable; rng only used to break absolute ties at the top of the list.
+    """
+    if k <= 0 or not cumulative:
+        return []
+    persona_arc = persona.get("archetype", "curious")
+    weights = _ARCHETYPE_AFFINITY.get(persona_arc, {})
+
+    candidates = [p for p in cumulative if p.get("id") not in exclude]
+    if not candidates:
+        return []
+
+    def _key(p: dict[str, Any]) -> tuple[float, int]:
+        post_arc = (p.get("agent") or {}).get("archetype", "curious")
+        w = weights.get(post_arc, 0.25)
+        # tiny rng jitter so when many posts tie at the top, selection differs
+        # across personas — keeps the feed non-deterministic-looking.
+        jitter = rng.random() * 1e-3
+        return (-(w + jitter), int(p["id"][1:]))
+
+    sorted_candidates = sorted(candidates, key=_key)
+    return sorted_candidates[: min(k, len(sorted_candidates))]
+
+
+def _curated_feed(
+    persona: dict[str, Any],
+    cumulative: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """Build a 6-post curated feed for one persona for one round.
+
+    Composition:
+      * top-3 by engagement_score (likes + 2*replies) — what's trending
+      * +2 affinity-matched (highest _ARCHETYPE_AFFINITY relative to persona)
+      * +1 random discovery pick
+
+    De-duplicates across the three slices and excludes the persona's own
+    posts (people don't reply to themselves on the feed). Returns at most 6
+    posts, less only when cumulative is small (round 1 returns []).
+    """
+    if not cumulative:
+        return []
+
+    persona_id = persona.get("persona_id") or persona.get("id")
+    own_ids: set[str] = {
+        p["id"]
+        for p in cumulative
+        if (p.get("agent") or {}).get("id") == persona_id
+    }
+
+    # Top by engagement — limit to 3 (was 5 in v6 _top_engaged).
+    top = _top_engaged(
+        [p for p in cumulative if p["id"] not in own_ids], rng=rng, k=3
+    )
+    selected_ids = {p["id"] for p in top}
+
+    # Affinity-matched, skipping ones already in `top` and own posts.
+    affinity = _affinity_matched(
+        persona,
+        cumulative,
+        k=2,
+        exclude=selected_ids | own_ids,
+        rng=rng,
+    )
+    selected_ids.update(p["id"] for p in affinity)
+
+    # Random discovery — bias to recent rounds so old posts don't dominate.
+    pool = [
+        p
+        for p in cumulative
+        if p["id"] not in selected_ids and p["id"] not in own_ids
+    ]
+    discovery: list[dict[str, Any]] = []
+    if pool:
+        discovery = [rng.choice(pool)]
+
+    feed = list(top) + list(affinity) + list(discovery)
+    return feed[:6]
+
+
+def _build_persona_user_prompt(
+    *,
+    persona: dict[str, Any],
+    draft: str,
+    mode: str,
+    round_n: int,
+    total_rounds: int,
+    curated_feed: list[dict[str, Any]],
+    persona_memory: str,
+) -> str:
+    """User prompt for one persona for one round.
+
+    Composes:
+      * mode-aware DRAFT POST / SCENARIO header (from v6 `_build_user_prompt`)
+      * curated feed block (top-engaged + affinity + discovery)
+      * persona memory block (this persona's last 2 actions)
+      * action schema spec inline
+    """
+    if mode == "hypothetical":
+        header = (
+            f'SCENARIO:\n"""\n{draft}\n"""\n\n'
+            "AUDIENCE CONTEXT: a slice of the general public on a major social "
+            "platform — mixed ages, geographies, perspectives. They are reacting as "
+            "themselves, not as customers of any particular brand.\n\n"
+        )
+    else:
+        header = (
+            f'DRAFT POST:\n"""\n{draft}\n"""\n\n'
+        )
+
+    if curated_feed:
+        feed_lines = []
+        for p in curated_feed:
+            agent = p.get("agent") or {}
+            arc = agent.get("archetype", "?")
+            handle = agent.get("handle", "?")
+            likes = int(p.get("like_count", 0) or 0)
+            replies = int(p.get("reply_count", 0) or 0)
+            text = (p.get("text") or "").replace("\n", " ").strip()
+            if len(text) > 240:
+                text = text[:237] + "..."
+            feed_lines.append(
+                f'- {p["id"]} ({arc} {handle}, '
+                f'likes={likes}, replies={replies}): "{text}"'
+            )
+        feed_block = (
+            "YOUR CURATED FEED for this round (what you'd actually scroll past):\n"
+            + "\n".join(feed_lines)
+            + "\n\nYou may reply to one of these posts (use its id as `replying_to`), "
+            "post a fresh take of your own, or skip. You may ALSO like up to 5 of "
+            "these posts via `likes_given` — only like things your bio + archetype "
+            "would actually like.\n"
+        )
+    else:
+        feed_block = (
+            "This is the FIRST round — nobody has posted yet. Your only options "
+            "are `post` (react to the input above) or `skip`. `replying_to` and "
+            "`likes_given` must be null/empty.\n"
+        )
+
+    memory_block = (
+        f"YOUR HISTORY THIS THREAD: {persona_memory}\n"
+        if persona_memory
+        else ""
+    )
+
+    return (
+        f"{header}"
+        f"ROUND: {round_n} of {total_rounds}\n\n"
+        f"{memory_block}"
+        f"{feed_block}\n"
+        "OUTPUT FORMAT (strict JSON object, no other text):\n"
+        "{\n"
+        '  "action": "post" | "reply" | "skip",\n'
+        '  "text": "<your reaction, 1-2 sentences, in your voice>" or null when skipping,\n'
+        '  "replying_to": "<a post id from the feed above, e.g. p7>" or null when posting/skipping,\n'
+        '  "sentiment": <-1.0..1.0> or null when skipping,\n'
+        '  "likes_given": ["<post id from feed>", ...] (max 5; empty array if you wouldn\'t like anything)\n'
+        "}\n\n"
+        "DECISION GUIDANCE:\n"
+        "- Most personas don't post EVERY round — `skip` is fine and realistic. "
+        "Aim to post or reply about half the time on average; lurkers a lot less.\n"
+        "- If you reply, make sure your `replying_to` id is in the feed above.\n"
+        "- Likes are cheap on social media; lurkers and enthusiasts in particular "
+        "like more than they post."
+    )
+
+
+@dataclass(slots=True)
+class PersonaAction:
+    persona_id: str
+    action: str  # "post" | "reply" | "skip"
+    text: str | None
+    replying_to: str | None
+    sentiment: float | None
+    likes_given: list[str]
+
+
+def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
+    """Best-effort parse. Never raises — falls back to skip on any issue."""
+    fallback = PersonaAction(
+        persona_id=persona_id,
+        action="skip",
+        text=None,
+        replying_to=None,
+        sentiment=None,
+        likes_given=[],
+    )
+    if not raw or not raw.strip():
+        return fallback
+    txt = raw.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S).strip()
+    obj: Any = None
+    try:
+        obj = json.loads(txt)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", txt, flags=re.S)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                obj = _repair_truncated_json(txt)
+        else:
+            obj = _repair_truncated_json(txt)
+    if not isinstance(obj, dict):
+        return fallback
+
+    action = obj.get("action")
+    if action not in ("post", "reply", "skip"):
+        return fallback
+
+    text_raw = obj.get("text")
+    text = text_raw.strip() if isinstance(text_raw, str) else None
+    if text is not None and len(text) > 400:
+        text = text[:400]
+    if action in ("post", "reply") and not text:
+        # action claims content but text missing — degrade to skip rather
+        # than emit an empty post.
+        action = "skip"
+        text = None
+
+    replying_to_raw = obj.get("replying_to")
+    replying_to = (
+        replying_to_raw if isinstance(replying_to_raw, str) and replying_to_raw.strip() else None
+    )
+    if action != "reply":
+        replying_to = None
+
+    sentiment: float | None = None
+    sent_raw = obj.get("sentiment")
+    if isinstance(sent_raw, (int, float)):
+        sentiment = max(-1.0, min(1.0, float(sent_raw)))
+    if action == "skip":
+        sentiment = None
+
+    likes_raw = obj.get("likes_given")
+    likes_given: list[str] = []
+    if isinstance(likes_raw, list):
+        for x in likes_raw[:5]:
+            if isinstance(x, str) and x.strip():
+                likes_given.append(x.strip())
+
+    return PersonaAction(
+        persona_id=persona_id,
+        action=action,
+        text=text,
+        replying_to=replying_to,
+        sentiment=sentiment,
+        likes_given=likes_given,
+    )
+
+
+async def _call_persona(
+    persona: dict[str, Any],
+    *,
+    draft: str,
+    mode: str,
+    round_n: int,
+    total_rounds: int,
+    curated_feed: list[dict[str, Any]],
+    persona_memory: str,
+    budget: BudgetCounter,
+    client: Any,
+) -> PersonaAction:
+    """One Gemini-2.5-flash-lite call per persona per round. Returns an
+    action dict; falls back to skip on parse / API failure (never raises
+    except BudgetExceededError, which the caller's wallclock layer maps to
+    the SSE error event).
+    """
+    persona_id = persona.get("persona_id") or persona.get("id") or "?"
+    system = _system_for_persona(persona, mode)
+    user = _build_persona_user_prompt(
+        persona=persona,
+        draft=draft,
+        mode=mode,
+        round_n=round_n,
+        total_rounds=total_rounds,
+        curated_feed=curated_feed,
+        persona_memory=persona_memory,
+    )
+    try:
+        raw = await _call_gemini(
+            system=system,
+            user=user,
+            schema=_PERSONA_ACTION_SCHEMA,
+            budget=budget,
+            client=client,
+        )
+    except BudgetExceededError:
+        raise
+    return _parse_persona_action(raw, persona_id)
+
+
+def _aggregate_round_actions(
+    persona_actions: list[PersonaAction],
+    *,
+    round_n: int,
+    cumulative: list[dict[str, Any]],
+    personas_by_id: dict[str, dict[str, Any]],
+    curated_feeds: dict[str, list[str]],
+    next_post_id: list[int],
+    known_post_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    """Turn N persona action payloads into engine outputs.
+
+    Returns:
+      new_posts            — list of post dicts (with agent metadata stamped,
+                              including bio/profession/hot_buttons per
+                              CONTRACTS §25). like_count starts at 0;
+                              reply_count is recomputed by the caller.
+      persistence_actions   — list of compact action dicts for the round_event
+                              JSON (CONTRACTS §28 — replay parity).
+      like_deltas           — dict[post_id → integer like delta this round]
+                              (already × _LIKE_DISPLAY_MULTIPLIER).
+    """
+    new_posts: list[dict[str, Any]] = []
+    persistence_actions: list[dict[str, Any]] = []
+    like_deltas: dict[str, int] = {}
+
+    for pa in persona_actions:
+        persona = personas_by_id.get(pa.persona_id)
+        if persona is None:
+            # Defensive: action came back tagged with an unknown id (shouldn't
+            # happen in the normal flow). Drop it from posts but still allow
+            # it into persistence so replay can show what happened.
+            persistence_actions.append(
+                {
+                    "persona_id": pa.persona_id,
+                    "action": pa.action,
+                    "text": pa.text,
+                    "replying_to": pa.replying_to,
+                    "sentiment": pa.sentiment,
+                    "likes_given": list(pa.likes_given),
+                }
+            )
+            continue
+
+        # Validate replying_to — only accept ids actually in the persona's
+        # curated feed for THIS round (prevents the model hallucinating a
+        # post id from outside its scroll). Falls back to "seed" if invalid
+        # and the action is "reply".
+        feed_ids = set(curated_feeds.get(pa.persona_id) or [])
+
+        if pa.action in ("post", "reply") and pa.text:
+            post_id = f"p{next_post_id[0]}"
+            next_post_id[0] += 1
+            if pa.action == "reply" and pa.replying_to and pa.replying_to in feed_ids:
+                parent = pa.replying_to
+            else:
+                parent = "seed"
+            sentiment = (
+                pa.sentiment
+                if pa.sentiment is not None
+                else 0.0
+            )
+            agent_block: dict[str, Any] = {
+                "id": persona.get("persona_id") or persona.get("id"),
+                "name": persona.get("name", "?"),
+                "handle": persona.get("handle", "?"),
+                "archetype": persona.get("archetype", "curious"),
+                "audience": persona.get("audience", "public"),
+                # Z2 / v7 (CONTRACTS §25): rich profile fields surfaced on
+                # the wire. Empty/null when persona genesis fell back to
+                # deterministic — Z3 FE tolerates that.
+                "bio": persona.get("bio") or "",
+                "profession": persona.get("profession"),
+                "hot_buttons": list(persona.get("hot_buttons") or []) or None,
+            }
+            post = {
+                "id": post_id,
+                "parent": parent,
+                "round": round_n,
+                "agent": agent_block,
+                "sentiment": float(sentiment),
+                "text": pa.text,
+                "like_count": 0,   # accumulated below from likes_given mentions
+                "reply_count": 0,  # recomputed by caller from cumulative
+            }
+            known_post_ids.add(post_id)
+            new_posts.append(post)
+
+        # Accumulate likes the persona gave to existing cumulative posts.
+        # We accept any post_id the model returns; in practice these ids will
+        # be from the feed, but we don't strictly enforce — extra ids that
+        # don't match a real post just no-op when applied later.
+        for liked_id in pa.likes_given:
+            like_deltas[liked_id] = like_deltas.get(liked_id, 0) + 1
+
+        persistence_actions.append(
+            {
+                "persona_id": pa.persona_id,
+                "action": pa.action,
+                "text": pa.text,
+                "replying_to": pa.replying_to,
+                "sentiment": pa.sentiment,
+                "likes_given": list(pa.likes_given),
+            }
+        )
+
+    # Apply display multiplier to deltas.
+    if _LIKE_DISPLAY_MULTIPLIER != 1:
+        like_deltas = {k: v * _LIKE_DISPLAY_MULTIPLIER for k, v in like_deltas.items()}
+
+    return new_posts, persistence_actions, like_deltas
+
+
+def _apply_v7_engagement(
+    cumulative: list[dict[str, Any]],
+    *,
+    like_deltas: dict[str, int],
+) -> None:
+    """Mutate `cumulative` in place — add per-round like deltas + recompute
+    reply_count. v7 like_count is the LLM-emergent SUM of per-persona likes
+    this round on top of prior rounds; reply_count is |children| per
+    CONTRACTS §22 (unchanged from v6).
+    """
+    by_id = {p["id"]: p for p in cumulative}
+    for post_id, delta in like_deltas.items():
+        target = by_id.get(post_id)
+        if target is None:
+            continue
+        target["like_count"] = int(target.get("like_count", 0) or 0) + int(delta)
+
+    # reply_count: simple parent-id index pass.
+    counts: dict[str, int] = {}
+    for c in cumulative:
+        parent = c.get("parent")
+        if parent and parent != "seed":
+            counts[parent] = counts.get(parent, 0) + 1
+    for p in cumulative:
+        p["reply_count"] = counts.get(p["id"], 0)
+
+
 # --------------------------------------------------------------- public API
 async def run_simulation(
     *,
@@ -1096,11 +1706,16 @@ async def run_simulation(
     terminal exception we yield an `event: error` with one of the
     CONTRACTS.md §5 error codes — never re-raise into the SSE handler.
 
-    Z1 / v7 (CONTRACTS §§25-30): when ECHO_ENGINE_VERSION="v7", we run the
-    persona-genesis call upfront and persist the rich pool to the personas
-    table BEFORE the round loop. The round loop still uses the v6
-    archetype-batched path until Z2 lands — the genesis output is unused
-    by the engine in Z1, but available to /history, debugging, and Z2.
+    Engine versioning (CONTRACTS §29):
+      * ECHO_ENGINE_VERSION="v6" (default) — original archetype-batched path.
+        ~92 calls per sim at rounds=15. Personas drawn from a 200-name pool
+        AFTER LLM via `_assign_personas`. Engagement deterministic via
+        `attach_engagement`. UNCHANGED by Z2.
+      * ECHO_ENGINE_VERSION="v7" — agentic per-persona engine (Z2). ONE
+        upfront genesis call generates a rich persona pool, then ONE
+        Gemini-2.5-flash-lite call per persona per round emits a structured
+        action (post/reply/skip + likes_given). Engagement is LLM-emergent.
+        Round-event JSON persists `persona_actions` for replay parity (L22).
     """
     if client is None:
         client = _make_client()
@@ -1119,25 +1734,35 @@ async def run_simulation(
     next_post_id = [1]   # boxed counter
     cumulative: list[dict[str, Any]] = []
 
+    # v7 persona pool — populated by genesis below. Empty for v6 sims (and
+    # v7 sims that crashed all the way through to no pool, which then fall
+    # through to v6 to avoid an empty-engine sim). Z2 round loop reads from
+    # this list directly rather than re-hitting the DB on every round.
+    v7_pool: list[dict[str, Any]] = []
+
     # Z1 / v7: persona genesis. Runs ONCE upfront, before round 1. Counts as
-    # 1 call against the per-sim budget. v6 path is untouched: when
-    # ECHO_ENGINE_VERSION != "v7" we never even import persona_genesis. Plan
-    # constraint: Z1 is additive — the round loop below consumes
-    # `build_persona_pool` (the v6 200-name pool), not the rich genesis pool.
-    # Z2 will swap that. Failures inside generate_persona_pool fall through
-    # to the deterministic fallback (and persist that), so the sim still
-    # completes.
-    if ECHO_ENGINE_VERSION == "v7" and persona_count is not None:
+    # 1 call against the per-sim budget. v6 path is untouched.
+    # Z2: when ECHO_ENGINE_VERSION="v7" we ALSO use the genesis output to
+    # drive the round loop. If persona_count was omitted on the request, we
+    # default to ECHO_DEFAULT_PERSONA_COUNT (50) per CONTRACTS §27.
+    if ECHO_ENGINE_VERSION == "v7":
         # Defer-import keeps swarm.py importable when persona_genesis is
         # absent (e.g. unit tests stubbing the module).
         from .persona_genesis import generate_persona_pool  # noqa: WPS433
         from . import db as _db  # noqa: WPS433 — local-only persistence hook
 
+        effective_persona_count = (
+            int(persona_count) if persona_count is not None else ECHO_DEFAULT_PERSONA_COUNT
+        )
+        # Clamp defensively — main.py validates [30, 100] but env-driven
+        # default could escape that.
+        effective_persona_count = max(1, min(200, effective_persona_count))
+
         try:
-            pool = await generate_persona_pool(
+            v7_pool = await generate_persona_pool(
                 audience=audience,
                 sim_id=sim_id,
-                count=int(persona_count),
+                count=effective_persona_count,
                 client=client,
                 budget=budget,
             )
@@ -1146,23 +1771,30 @@ async def run_simulation(
             # budget violation — we did not even reach round 1.
             raise
         except Exception as exc:  # noqa: BLE001
-            # Genesis is best-effort in Z1. If something exotic blows up
-            # outside the function's own try/except (e.g. OOM during
-            # validation), don't crash the sim — just log and fall back to
-            # an empty pool. Z2 will tighten this; for Z1 the v6 round loop
-            # doesn't depend on the pool anyway.
             log.exception("persona genesis crashed for %s: %r", sim_id, exc)
-            pool = []
+            v7_pool = []
 
-        if pool:
+        if v7_pool:
             try:
-                _db.insert_personas(sim_id, pool)
+                _db.insert_personas(sim_id, v7_pool)
             except Exception as exc:  # noqa: BLE001
-                # Persistence failures are loud but non-fatal — Z2 will
-                # re-read from DB, but Z1 doesn't depend on it. Log + move on.
+                # Persistence failures are loud but non-fatal for the round
+                # loop — we keep the in-memory pool. Replay determinism
+                # depends on the `persona_actions` payload in round_events,
+                # not on `personas` rows.
                 log.exception("persona persistence failed for %s: %r", sim_id, exc)
 
-    async def _inner() -> AsyncIterator[dict[str, Any]]:
+    # Engine selection. v7 needs a non-empty pool to run; otherwise we fall
+    # through to v6 (defensive — keeps the rollback drill green even when
+    # Z1 genesis fails for unexpected reasons mid-Z2 deployment).
+    use_v7_engine = ECHO_ENGINE_VERSION == "v7" and bool(v7_pool)
+    if ECHO_ENGINE_VERSION == "v7" and not v7_pool:
+        log.warning(
+            "v7 engine requested but persona pool is empty — falling through to v6 path for sim=%s",
+            sim_id,
+        )
+
+    async def _inner_v6() -> AsyncIterator[dict[str, Any]]:
         for round_n in range(1, rounds + 1):
             # v6: prior_top now ranks by engagement_score (like_count +
             # reply_count*2). Engagement was attached at the end of the
@@ -1251,6 +1883,145 @@ async def run_simulation(
             "event": "done",
             "data": {"simulation_id": sim_id},
         }
+
+    async def _inner_v7() -> AsyncIterator[dict[str, Any]]:
+        """Z2 / v7 agentic engine — per-persona LLM agents per round.
+
+        For each round we:
+          1. Build a curated 6-post feed per persona (top-engaged + affinity
+             + 1 random discovery).
+          2. Build per-persona memory of their last 2 actions in this sim.
+          3. Fire 50-100 concurrent _call_persona Gemini calls (capped to
+             MAX_CONCURRENT by the process-global semaphore).
+          4. Aggregate actions → new posts (with bio/profession/hot_buttons
+             stamped) + like deltas (LLM-emergent).
+          5. Apply like deltas + recompute reply_count on cumulative.
+          6. Emit SSE round event with `posts` AND `persona_actions`
+             (CONTRACTS §28 — replay parity).
+        """
+        # Index personas for fast lookup. The pool is the in-memory v7_pool
+        # (genesis output) — Z2 doesn't re-read DB per round.
+        personas_by_id: dict[str, dict[str, Any]] = {
+            p["persona_id"]: p for p in v7_pool
+        }
+        # Per-persona action history for the memory block.
+        history: dict[str, list[dict[str, Any]]] = {pid: [] for pid in personas_by_id}
+
+        for round_n in range(1, rounds + 1):
+            # Build curated feed + memory per persona for this round.
+            curated_feeds: dict[str, list[dict[str, Any]]] = {}
+            curated_feed_ids: dict[str, list[str]] = {}
+            persona_memories: dict[str, str] = {}
+            for persona in v7_pool:
+                pid = persona["persona_id"]
+                feed = _curated_feed(persona, cumulative, rng=rng)
+                curated_feeds[pid] = feed
+                curated_feed_ids[pid] = [p["id"] for p in feed]
+                persona_memories[pid] = _persona_memory(pid, cumulative, history)
+
+            # Fire all persona calls concurrently — global semaphore caps in-
+            # flight at MAX_CONCURRENT. asyncio.gather with return_exceptions
+            # so a single-call failure doesn't kill the round.
+            results = await asyncio.gather(
+                *[
+                    _call_persona(
+                        persona,
+                        draft=draft,
+                        mode=mode,
+                        round_n=round_n,
+                        total_rounds=rounds,
+                        curated_feed=curated_feeds[persona["persona_id"]],
+                        persona_memory=persona_memories[persona["persona_id"]],
+                        budget=budget,
+                        client=client,
+                    )
+                    for persona in v7_pool
+                ],
+                return_exceptions=True,
+            )
+
+            persona_actions: list[PersonaAction] = []
+            for persona, res in zip(v7_pool, results):
+                pid = persona["persona_id"]
+                if isinstance(res, BudgetExceededError):
+                    raise res
+                if isinstance(res, Exception):
+                    log.warning("v7 persona %s call failed: %r", pid, res)
+                    persona_actions.append(
+                        PersonaAction(
+                            persona_id=pid,
+                            action="skip",
+                            text=None,
+                            replying_to=None,
+                            sentiment=None,
+                            likes_given=[],
+                        )
+                    )
+                else:
+                    persona_actions.append(res)
+
+            new_posts, persistence_actions, like_deltas = _aggregate_round_actions(
+                persona_actions,
+                round_n=round_n,
+                cumulative=cumulative,
+                personas_by_id=personas_by_id,
+                curated_feeds=curated_feed_ids,
+                next_post_id=next_post_id,
+                known_post_ids=known_post_ids,
+            )
+            cumulative.extend(new_posts)
+            _apply_v7_engagement(cumulative, like_deltas=like_deltas)
+
+            # Update history for the memory block in subsequent rounds.
+            for pa in persona_actions:
+                history.setdefault(pa.persona_id, []).append(
+                    {
+                        "round": round_n,
+                        "action": pa.action,
+                        "text": pa.text,
+                        "replying_to": pa.replying_to,
+                        "likes_given": list(pa.likes_given),
+                    }
+                )
+
+            sorted_posts = _sort_posts(cumulative)
+            yield {
+                "event": "round",
+                "data": {
+                    "round": round_n,
+                    "of": rounds,
+                    "posts": sorted_posts,
+                    # CONTRACTS §28: persisted alongside posts so replay
+                    # re-renders directly from disk with no LLM re-run.
+                    "persona_actions": persistence_actions,
+                },
+            }
+
+        # Final analysis call — reuses the existing v6 analyze() since the
+        # post wire shape is the same. Counts as 1 call against the budget.
+        analysis = await analyze(
+            draft=draft,
+            posts=cumulative,
+            audience=audience,
+            budget=budget,
+            client=client,
+        )
+        yield {
+            "event": "_analysis",
+            "data": analysis,
+        }
+        try:
+            schedule_auto_report(sim_id)
+        except Exception:  # noqa: BLE001
+            log.exception("auto-report: failed to schedule for %s", sim_id)
+        yield {
+            "event": "done",
+            "data": {"simulation_id": sim_id},
+        }
+
+    # Engine dispatch. The async generator object is built lazily — calling
+    # _inner_v6() doesn't run anything until the producer iterates.
+    _inner = _inner_v7 if use_v7_engine else _inner_v6
 
     # Wrap inner generator with the wallclock cap. Use a queue + task so we can
     # enforce a single global timeout across the whole stream rather than
