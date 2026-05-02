@@ -235,3 +235,95 @@ Human-readable messages can vary; the `code` is what the frontend branches on.
 ---
 
 **v1 LOCKED — 2026-05-01.** Changes require `team-lead` sign-off in `.team/inbox/`.
+
+---
+
+# v2 — additive endpoints (2026-05-02)
+
+**v2 is purely additive.** All v1 shapes (§1–§7 above) remain LOCKED and unchanged. v2 adds two read-only endpoints to support the History page and a "view simulation again" button on `/results`. Both endpoints are **zero LLM calls** — they read from SQLite only.
+
+## 8. GET /history
+
+List past simulations, newest first. Used by `/history` page.
+
+**Request:** no body. Optional query params:
+- `limit` (int, default 50, max 200)
+
+**200 response:**
+
+```ts
+{
+  "items": [
+    {
+      "simulation_id": string,         // "sim_<10 hex>"
+      "draft":         string,         // 1-2 sentence preview (truncate to 240 chars on backend)
+      "rounds":        number,         // 3..6
+      "post_count":    number,         // total posts persisted (≈24 per round)
+      "tone":          "positive" | "caution" | "danger" | "neutral",
+                                       // derived from analysis if present:
+                                       //   positive  → mean(post.sentiment) ≥  0.20
+                                       //   caution   → mean ∈ [-0.10, 0.20)
+                                       //   danger    → mean < -0.10
+                                       //   neutral   → analysis missing / sim incomplete
+      "mean_sentiment": number,        // mean of all post sentiments, -1..1, 2-decimal
+      "created_at":    string,         // ISO-8601 UTC, e.g. "2026-05-02T01:50:00Z"
+      "has_analysis":  boolean         // true if analyses table has a row for this sim
+    },
+    ...
+  ]
+}
+```
+
+**Errors:**
+
+| Status | code | When |
+|---|---|---|
+| 500 | `internal_error` | DB read failed |
+
+## 9. GET /simulate/replay?simulation_id=…
+
+Return the final persisted state of a completed simulation as one JSON payload — NOT SSE. Used by `/simulating?id=…&replay=1` (the "View thread" button on /results) and by `/history` cards (when clicked).
+
+**Request:** query param `simulation_id` (required).
+
+**200 response:**
+
+```ts
+{
+  "simulation_id": string,
+  "draft":         string,            // the original draft, verbatim (full, not truncated)
+  "rounds":        number,            // total rounds (== highest round in posts)
+  "posts": [
+    // Same shape as v1 §3 round event's posts[] — cumulative, sorted (round asc, id asc).
+    // Fields: { id, parent, round, agent:{id,name,handle,archetype,audience}, sentiment, text }
+  ],
+  "analysis": null | {
+    // Same shape as v1 §4 — { tldr, suggested_rewrite:{original,rewrite}, worth_reading:[3] }
+    // null if analysis hasn't been persisted yet (sim still running or errored)
+  },
+  "created_at": string                 // ISO-8601 UTC
+}
+```
+
+**Errors:**
+
+| Status | code | When |
+|---|---|---|
+| 404 | `unknown_simulation` | id not in DB |
+| 500 | `internal_error` | unexpected |
+
+## 10. Frontend integration crib (additions)
+
+- **`/results` page**: add a secondary "View thread again" button (variant=ghost, icon=replies) next to "Re-run". Routes to `/simulating?id=${simulation_id}&replay=1`.
+- **`/simulating` page**: when query param `replay=1`, do NOT open EventSource. Instead, `fetch /api/simulate/replay?simulation_id=…` once, then drive the same paced ingest (1.2s gap per round) using the persisted `posts` partitioned by `post.round`. The 2s linger before /results auto-redirect should be SKIPPED in replay mode (let user navigate manually). Topbar shows "Replay · Round X of Y" instead of "Round X of Y". No "Pause" button (nothing to pause). Add a "Back to results" button instead.
+- **`/history` page**: on mount, `fetch /api/history?limit=50`. Render real items in place of the static mock. Each card on click → `router.push('/results?id='+sim_id)` (which already supports loading any sim's analysis from DB). Empty state: "No simulations yet. Run your first one." with a CTA to /compose.
+
+## 11. Backend integration crib (additions)
+
+- **`api/app/db.py`**: add `list_simulations(limit:int) -> list[dict]` reading from `simulations` left-joined with `analyses`. Compute mean_sentiment by reading the latest `round_events.payload` and averaging post sentiments. Compute tone via the thresholds in §8.
+- **`api/app/db.py`**: add `get_simulation_full(sim_id) -> dict` returning sim metadata + the latest cumulative posts (from the highest-round `round_events` row) + analysis (or None).
+- **`api/app/main.py`**: add the two new routes. Both wrapped in try/except → `internal_error`. Both annotated with strict pydantic response models.
+
+---
+
+**v2 LOCKED — 2026-05-02.** All v1 shapes preserved. Implementations land in Phase E.
