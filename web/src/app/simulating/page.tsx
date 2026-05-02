@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Frame, StepIndicator } from "@/components/Shell";
 import { Button, Icon } from "@/components/ui/Primitives";
 import { SEED_DRAFT, SwarmThread } from "@/components/SwarmThread";
+import type { SortMode } from "@/lib/tree-builder";
 import {
   api,
   ApiError,
@@ -111,6 +112,14 @@ function SimulatingInner() {
   // for legacy / unset cases. Live mode hydrates from sessionStorage; replay
   // mode overwrites from the /simulate/replay payload.
   const [mode, setMode] = useState<SimulationMode>("business");
+  // R2 — top-level thread ordering. Live sims start in "arrival" so posts
+  // appear in arrival/round-id order while engagement signal is still
+  // building; on phase → report-pending, we flip to "engagement" which
+  // triggers the FLIP animated re-sort to engagement-DESC. Replay mode
+  // starts in "engagement" since the final state is already known.
+  const [sortMode, setSortMode] = useState<SortMode>(
+    isReplay ? "engagement" : "arrival",
+  );
   const sourceRef = useRef<EventSource | null>(null);
 
   // Paced ingest. Server can deliver round events back-to-back when the LLM is
@@ -149,6 +158,10 @@ function SimulatingInner() {
       if (reportInFlightRef.current) return;
       reportInFlightRef.current = true;
       setPhase("report-pending");
+      // R2 — flip top-level thread order to engagement-DESC. SwarmThread's
+      // FLIP useLayoutEffect picks up the change and animates the re-sort.
+      // Sub-thread chronology is preserved by the tree-builder.
+      setSortMode("engagement");
 
       let cancelled = false;
       void (async () => {
@@ -453,6 +466,7 @@ function SimulatingInner() {
             running={running}
             posts={posts}
             mode={mode}
+            sortMode={sortMode}
           />
         </div>
         {/* Q2 — report-readiness status panel. Lives below the SwarmThread,

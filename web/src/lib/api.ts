@@ -64,6 +64,11 @@ export interface ServerPost {
   agent: ServerAgent;
   sentiment: number;
   text: string;
+  // v6 §21 — engagement signal. Backend computes deterministically per
+  // (sim_id, post_id, round); FE just renders. Defaults to 0 for backward
+  // compat with v1-v5 replays where the algorithm wasn't yet enabled.
+  like_count: number;
+  reply_count: number;
 }
 
 export interface RoundEvent {

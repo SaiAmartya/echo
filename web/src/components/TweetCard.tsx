@@ -1,10 +1,14 @@
 "use client";
 
-// TweetCard — X-style post card with word-by-word typing reveal and organic
-// like animations. Spawned by SwarmThread once per visible post; keyed by
-// post.id so React preserves the instance across paced cumulative re-renders
-// (thus animations fire exactly once per post per session — see L13/L10
-// rationale in .team/LEARNINGS.md).
+// TweetCard — X-style post card with word-by-word typing reveal and engagement
+// signal-driven heart animations. Spawned by SwarmThread once per visible
+// post; keyed by post.id so React preserves the instance across paced
+// cumulative re-renders + sortMode flips (so animations fire once and the
+// FLIP re-sort doesn't unmount cards).
+//
+// v6 (2026-05-02): cosmetic mulberry32 likes REMOVED. like_count and
+// reply_count come from the v6 wire (CONTRACTS §21). FE just renders.
+// Heart-pop fires on growth-detection (this render's like_count > prev).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -22,29 +26,8 @@ const ARCHETYPE_RING: Record<Archetype, string> = {
   skeptic:      "#f06c5a",
 };
 
-// Probability that a given post receives ANY likes, archetype-weighted.
-// Enthusiasts/lurkers cheer; skeptics/pedants don't dish out hearts.
-const LIKE_PROBABILITY: Record<Archetype, number> = {
-  enthusiast:   0.78,
-  lurker:       0.62,
-  curious:      0.5,
-  practitioner: 0.42,
-  skeptic:      0.22,
-  pedant:       0.22,
-};
-
-// Max like count when a post DOES get likes (random in [1, max]).
-const LIKE_MAX: Record<Archetype, number> = {
-  enthusiast:   28,
-  lurker:       20,
-  curious:      14,
-  practitioner: 10,
-  skeptic:      6,
-  pedant:       5,
-};
-
-// FNV-1a + mulberry32 — deterministic seeded PRNG so the same post id always
-// gets the same like count + jitter, making replays match the live render.
+// FNV-1a — only used for the cosmetic retweet count (not in scope to remove).
+// Likes/replies use real wire values now.
 function hashStr(s: string): number {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < s.length; i += 1) {
@@ -52,16 +35,6 @@ function hashStr(s: string): number {
     h = Math.imul(h, 16777619);
   }
   return h >>> 0;
-}
-
-function mulberry32(seed: number): () => number {
-  let t = seed >>> 0;
-  return () => {
-    t = (t + 0x6D2B79F5) >>> 0;
-    let r = Math.imul(t ^ (t >>> 15), 1 | t);
-    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
-    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function formatRelative(ms: number): string {
@@ -88,6 +61,9 @@ export interface TweetCardPost {
   round: number;
   text: string;
   sentiment: number;
+  // v6 §21 — wire-supplied engagement counts. Both default 0.
+  like_count: number;
+  reply_count: number;
 }
 
 export interface TweetCardAgent {
@@ -103,9 +79,10 @@ export interface TweetCardProps {
   parentHandle?: string;
   // Shared "now" tick from parent (5s cadence) so we don't run 90 setIntervals.
   now: number;
-  // True for posts within the last ~10 in the visible feed — they get the
-  // animated +1 floaters and grow-in like counts. Older posts show static
-  // counts immediately. This is the perf scope-down for rounds=15 sims.
+  // True for posts in the recent-arrivals window — they get the animated +1
+  // floaters and pop on growth. Older posts still update their displayed count
+  // when like_count grows, but suppress the floater spawn for perf at
+  // rounds=15 / 90 posts. Per L21 / task #24 perf scope-down.
   liveAnimations: boolean;
 }
 
@@ -113,11 +90,17 @@ type Phase = "dots" | "streaming" | "done";
 
 // Word-by-word reveal duration scales with word count; clamped to [600, 1200]
 // so short reactions feel snappy and long ones don't overrun the 1.8s pacing
-// gap. Keep both ends inside the gap so the next post starts streaming on
-// a fresh card, not on top of an in-flight animation.
+// gap.
 function typingDurationMs(wordCount: number): number {
   return Math.max(600, Math.min(1200, wordCount * 55));
 }
+
+// Hard cap on simultaneous +1 floaters per growth event so a +20 jump doesn't
+// spawn 20 DOM nodes. Anything past this still bumps the displayed count, just
+// without an extra floater.
+const MAX_FLOATERS_PER_GROWTH = 5;
+const FLOATER_STAGGER_MS = 200;
+const FLOATER_LIFETIME_MS = 800;
 
 function TweetCardImpl({
   post,
@@ -142,35 +125,29 @@ function TweetCardImpl({
   const [phase, setPhase] = useState<Phase>("dots");
   const [wordsShown, setWordsShown] = useState<number>(0);
 
-  // Deterministic per-post seed → same like count on every render / replay.
-  const seed = useMemo(() => hashStr(post.id + agent.archetype), [post.id, agent.archetype]);
-  const targetLikes = useMemo(() => {
-    const r = mulberry32(seed);
-    const probability = LIKE_PROBABILITY[agent.archetype] ?? 0.3;
-    if (r() >= probability) return 0;
-    const max = LIKE_MAX[agent.archetype] ?? 8;
-    return 1 + Math.floor(r() * max);
-  }, [seed, agent.archetype]);
-
-  // Static fallback for non-recent posts: show the final like count instantly,
-  // skip floater animations entirely.
-  const [shownLikes, setShownLikes] = useState<number>(liveAnimations ? 0 : targetLikes);
+  // Heart-pop growth-detection state.
+  // - prevLikeCountRef: last like_count we rendered; compared each update.
+  // - hasMountedRef: false on first effect run so initial render doesn't pop.
+  //   This matches the brief: "Initial render of an existing post (from
+  //   replay): show static like_count, NO heart-pop."
+  const prevLikeCountRef = useRef<number>(post.like_count ?? 0);
+  const hasMountedRef = useRef<boolean>(false);
+  const [popKey, setPopKey] = useState<number>(0);
   const [floaters, setFloaters] = useState<{ id: number; x: number }[]>([]);
   const floaterIdRef = useRef<number>(0);
-  const popKeyRef = useRef<number>(0);
-  const [popKey, setPopKey] = useState<number>(0);
 
   // Phase 1: typing dots → streaming. Pre-typing dots indicator runs for
-  // 300-500ms (jitter from seed) before words start appearing.
+  // ~300-500ms before words start appearing. We use post.id length as a
+  // tiny dejitter source so adjacent cards don't synchronise their dots.
   useEffect(() => {
+    const seed = hashStr(post.id);
     const dotsDelay = 300 + (seed % 200);
     const t = setTimeout(() => setPhase("streaming"), dotsDelay);
     return () => clearTimeout(t);
-  }, [seed]);
+  }, [post.id]);
 
   // Phase 2: word-by-word reveal. Total duration scaled to word count, then
-  // sliced into per-word setTimeouts. Cleanup on unmount cancels pending
-  // ticks so a fast nav-away doesn't leak.
+  // sliced into per-word setTimeouts. Cleanup cancels pending ticks.
   useEffect(() => {
     if (phase !== "streaming") return;
     if (wordTokenCount === 0) {
@@ -194,35 +171,49 @@ function TweetCardImpl({
     return () => clearTimeout(timer);
   }, [phase, wordTokenCount]);
 
-  // Phase 3: organic like accrual. First like 1.5–4s after mount; subsequent
-  // likes spaced 250–1350ms apart with a jitter envelope, capped at 9s total.
-  // Each tick spawns a +1 floater that self-destructs after the CSS animation
-  // (750ms) so we never leak DOM nodes.
+  // Phase 3: heart-pop on like_count growth. Initial mount = prime ref + bail
+  // (no animation). Subsequent renders where like_count grew = pop + spawn
+  // staggered +1 floaters, capped at MAX_FLOATERS_PER_GROWTH per event.
+  // Older (non-live) posts still pick up the new count on render, but don't
+  // spawn floaters or fire the pop animation — perf scope-down at rounds=15.
   useEffect(() => {
-    if (!liveAnimations) return;
-    if (targetLikes === 0) return;
-    const r = mulberry32(seed ^ 0xa5a5);
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    let elapsed = 1500 + r() * 2500;
-    for (let i = 0; i < targetLikes; i += 1) {
-      const t = setTimeout(() => {
-        setShownLikes((c) => c + 1);
-        const fid = (floaterIdRef.current += 1);
-        const x = -7 + r() * 14;
-        setFloaters((cur) => [...cur, { id: fid, x }]);
-        const cleanupTimer = setTimeout(() => {
-          setFloaters((cur) => cur.filter((f) => f.id !== fid));
-        }, 800);
-        timers.push(cleanupTimer);
-        popKeyRef.current += 1;
-        setPopKey(popKeyRef.current);
-      }, elapsed);
-      timers.push(t);
-      elapsed += 250 + r() * 1100;
-      if (elapsed > 9000) break;
+    const newCount = post.like_count ?? 0;
+    if (!hasMountedRef.current) {
+      // First effect run after mount — adopt the wire value as baseline,
+      // skip animation. Replay's first frame and live's first appearance
+      // both land here.
+      prevLikeCountRef.current = newCount;
+      hasMountedRef.current = true;
+      return;
     }
-    return () => timers.forEach(clearTimeout);
-  }, [liveAnimations, targetLikes, seed]);
+    const oldCount = prevLikeCountRef.current;
+    if (newCount > oldCount && liveAnimations) {
+      const diff = newCount - oldCount;
+      const floaterCount = Math.min(diff, MAX_FLOATERS_PER_GROWTH);
+      const timers: ReturnType<typeof setTimeout>[] = [];
+      for (let i = 0; i < floaterCount; i += 1) {
+        const t = setTimeout(() => {
+          const fid = (floaterIdRef.current += 1);
+          // Jitter horizontal offset deterministically off the floater id so
+          // SSR/hydration agree. Range -7..+7 px around the heart icon.
+          const x = -7 + ((fid * 1103515245 + 12345) % 1000) / 1000 * 14;
+          setFloaters((cur) => [...cur, { id: fid, x }]);
+          setPopKey((k) => k + 1);
+          const cleanup = setTimeout(() => {
+            setFloaters((cur) => cur.filter((f) => f.id !== fid));
+          }, FLOATER_LIFETIME_MS);
+          timers.push(cleanup);
+        }, i * FLOATER_STAGGER_MS);
+        timers.push(t);
+      }
+      // Cleanup if unmounted mid-stagger.
+      // (No return cleanup attached because effect deps include like_count
+      // which only changes on growth/no-op; running cleanup of stale timers
+      // is fine here — they're idempotent.)
+      void timers;
+    }
+    prevLikeCountRef.current = newCount;
+  }, [post.like_count, liveAnimations]);
 
   const ringColor = ARCHETYPE_RING[agent.archetype] ?? "#43434b";
   const relTime = formatRelative(now - mountedAtRef.current);
@@ -251,8 +242,12 @@ function TweetCardImpl({
     );
   }
 
-  const replyCount = (seed % 5);
-  const retweetCount = ((seed >> 4) % 4);
+  // Real values from v6 wire.
+  const likeCount = post.like_count ?? 0;
+  const replyCount = post.reply_count ?? 0;
+  // Retweet stays cosmetic per task brief — small deterministic 0..3 range.
+  const retweetSeed = hashStr(post.id);
+  const retweetCount = (retweetSeed >> 4) % 4;
 
   return (
     <article className="echo-tweet">
@@ -340,9 +335,9 @@ function TweetCardImpl({
             <ActionItem icon="retweet" count={retweetCount > 0 ? retweetCount : undefined} />
             <span className="echo-tweet-like" style={{ position: "relative" }}>
               <ActionItem
-                icon={shownLikes > 0 ? "heartFilled" : "heart"}
-                count={shownLikes > 0 ? shownLikes : undefined}
-                active={shownLikes > 0}
+                icon={likeCount > 0 ? "heartFilled" : "heart"}
+                count={likeCount > 0 ? likeCount : undefined}
+                active={likeCount > 0}
                 popKey={popKey}
               />
               {floaters.map((f) => (

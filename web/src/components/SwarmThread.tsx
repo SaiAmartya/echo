@@ -1,14 +1,26 @@
 "use client";
 
-// SwarmThread — two-column layout: X-style thread (left, 60%) + ambient
-// "room" force-graph (right, 40%, dimmed). The thread is the hero; the room
-// is supporting context. See TweetCard.tsx for the per-post animation logic.
+// SwarmThread — two-column layout: X-style INDENTED thread (left, 60%) +
+// ambient "room" force-graph (right, 40%, dimmed). The thread is the hero;
+// the room is supporting context. See TweetCard.tsx for the per-post
+// animation logic; tree-builder.ts for the pure parent-child grouping;
+// SwarmMap.tsx for the right-column visualization; swarm-graph.ts for the
+// shared cluster geometry helpers.
+//
+// v6 / R2 (2026-05-02): rewrote thread column to render top-level posts +
+// indented level-1 children with a vertical thread-line. sortMode toggles
+// arrival vs engagement-DESC ordering for top-level posts; FLIP animates the
+// transition. Sub-thread order stays chronological regardless. Cosmetic
+// like-count generation is gone — TweetCard now consumes wire values per
+// CONTRACTS v6 §21.
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ServerPost, SimulationMode } from "@/lib/api";
+import { agentPoint, type Archetype } from "@/lib/swarm-graph";
+import { buildThreadGroups, type SortMode } from "@/lib/tree-builder";
+import { SwarmMap, type SwarmMapEdge } from "./SwarmMap";
 import { TweetCard } from "./TweetCard";
 
-type Archetype = "skeptic" | "enthusiast" | "curious" | "practitioner" | "pedant" | "lurker";
 type AudienceKind = "target" | "public";
 
 type Agent = {
@@ -26,6 +38,8 @@ type ThreadEvent = {
   agent: string;
   sentiment: number;
   text: string;
+  like_count: number;
+  reply_count: number;
 };
 
 export type { ServerPost };
@@ -46,41 +60,11 @@ const SEED_AGENTS: Agent[] = [
 ];
 
 const THREAD_SCRIPT: ThreadEvent[] = [
-  { id: "p1", round: 1, parent: "seed", agent: "a2", sentiment:  0.58, text: "finally. weekly memo > all-hands theatre." },
-  { id: "p2", round: 1, parent: "seed", agent: "a1", sentiment: -0.12, text: "monthly memos > quarterly OKRs but you'll still need a way to track outcomes. otherwise it's just velocity theater." },
-  { id: "p3", round: 1, parent: "seed", agent: "a4", sentiment:  0.42, text: "saved. doing this." },
-  { id: "p4", round: 1, parent: "seed", agent: "a3", sentiment:  0.04, text: "this works for product. how does it work for sales?" },
+  { id: "p1", round: 1, parent: "seed", agent: "a2", sentiment:  0.58, text: "finally. weekly memo > all-hands theatre.", like_count: 0, reply_count: 0 },
+  { id: "p2", round: 1, parent: "seed", agent: "a1", sentiment: -0.12, text: "monthly memos > quarterly OKRs but you'll still need a way to track outcomes. otherwise it's just velocity theater.", like_count: 0, reply_count: 0 },
+  { id: "p3", round: 1, parent: "seed", agent: "a4", sentiment:  0.42, text: "saved. doing this.", like_count: 0, reply_count: 0 },
+  { id: "p4", round: 1, parent: "seed", agent: "a3", sentiment:  0.04, text: "this works for product. how does it work for sales?", like_count: 0, reply_count: 0 },
 ];
-
-const CLUSTER_CENTERS: Record<Archetype, { x: number; y: number; color: string }> = {
-  enthusiast:   { x: -90,  y: -55, color: "#7dd49a" },
-  practitioner: { x:  10,  y: -75, color: "#9bc97f" },
-  curious:      { x:  90,  y: -25, color: "#b8b8c0" },
-  lurker:       { x:  90,  y:  55, color: "#b8b8c0" },
-  pedant:       { x:  -5,  y:  85, color: "#e8b75a" },
-  skeptic:      { x: -100, y:  35, color: "#f06c5a" },
-};
-
-function toneColor(s: number): string {
-  return s > 0.15 ? "#7dd49a" : s < -0.15 ? "#f06c5a" : "#b8b8c0";
-}
-
-// Small helper: round any svg coord to 2 decimals so SSR (Node V8) and
-// hydration (browser V8) emit the same string. Some Math.cos/sin chains
-// previously diverged at the 14th decimal place and tripped React's
-// hydration mismatch warning on cx attributes.
-function r2(n: number): string {
-  return n.toFixed(2);
-}
-
-function agentPoint(agentId: string, archetype: Archetype): { x: number; y: number; color: string } {
-  const center = CLUSTER_CENTERS[archetype] || CLUSTER_CENTERS.lurker;
-  let h = 0;
-  for (let i = 0; i < agentId.length; i += 1) h = (h * 31 + agentId.charCodeAt(i)) >>> 0;
-  const a = ((h % 1000) / 1000) * Math.PI * 2;
-  const r = 14 + (((h >> 10) % 1000) / 1000) * 22;
-  return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r, color: center.color };
-}
 
 function normalize(
   posts: ServerPost[] | undefined,
@@ -96,6 +80,7 @@ function normalize(
   const events: ThreadEvent[] = filtered.map((p) => ({
     id: p.id, round: p.round, parent: p.parent, agent: p.agent.id,
     sentiment: p.sentiment, text: p.text,
+    like_count: p.like_count ?? 0, reply_count: p.reply_count ?? 0,
   }));
   const seen = new Set<string>();
   const agents: Agent[] = [];
@@ -117,6 +102,7 @@ export function SwarmThread({
   running = false,
   posts,
   mode = "business",
+  sortMode = "arrival",
 }: {
   currentRound?: number;
   maxRounds?: number;
@@ -124,15 +110,15 @@ export function SwarmThread({
   running?: boolean;
   posts?: ServerPost[];
   mode?: SimulationMode;
+  sortMode?: SortMode;
 }) {
   void maxRounds;
   const { events, agents } = normalize(posts, currentRound);
   const agentMap = new Map<string, Agent>(agents.map((a) => [a.id, a]));
   const lookup = (id: string): Agent | undefined => agentMap.get(id);
 
-  type Edge = { from: { x: number; y: number }; to: { x: number; y: number }; sentiment: number };
-  const edges: Edge[] = events
-    .map((p): Edge | null => {
+  const edges: SwarmMapEdge[] = events
+    .map((p): SwarmMapEdge | null => {
       const ag = lookup(p.agent);
       if (!ag) return null;
       const me = agentPoint(ag.id, ag.archetype);
@@ -144,7 +130,7 @@ export function SwarmThread({
       const them = agentPoint(pAg.id, pAg.archetype);
       return { from: me, to: them, sentiment: p.sentiment };
     })
-    .filter((e): e is Edge => e !== null);
+    .filter((e): e is SwarmMapEdge => e !== null);
 
   const childCounts: Record<string, number> = {};
   events.forEach((p) => { childCounts[p.parent] = (childCounts[p.parent] || 0) + 1; });
@@ -155,24 +141,37 @@ export function SwarmThread({
   );
 
   return (
-    // 60/40 split favoring the thread — the room is now supporting context.
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) minmax(0, 1fr)", gap: 16, height: "100%" }}>
-      <ThreadColumn seedDraft={seedDraft} posts={events} lookup={lookup} mode={mode} />
-      <SwarmMap posts={events} edges={edges} dogpileIds={dogpileIds} running={running} agents={agents} />
+      <ThreadColumn
+        seedDraft={seedDraft}
+        events={events}
+        lookup={lookup}
+        mode={mode}
+        sortMode={sortMode}
+      />
+      <SwarmMap
+        posts={events.map((p) => ({ id: p.id, agent: p.agent }))}
+        edges={edges}
+        dogpileIds={dogpileIds}
+        running={running}
+        agents={agents}
+      />
     </div>
   );
 }
 
 function ThreadColumn({
   seedDraft,
-  posts,
+  events,
   lookup,
   mode = "business",
+  sortMode,
 }: {
   seedDraft: string;
-  posts: ThreadEvent[];
+  events: ThreadEvent[];
   lookup: (id: string) => Agent | undefined;
   mode?: SimulationMode;
+  sortMode: SortMode;
 }) {
   // Shared "now" tick (5s cadence) so all TweetCards refresh their relative
   // timestamps in lockstep without each running its own setInterval.
@@ -182,21 +181,90 @@ function ThreadColumn({
     return () => window.clearInterval(t);
   }, []);
 
-  // Build parent-handle lookup so each TweetCard can render "Replying to @x".
+  // Build the indented tree. Sub-thread order stays chronological regardless
+  // of sortMode; only top-level groups respond to engagement-DESC ranking.
+  const groups = buildThreadGroups(events, sortMode);
+
+  // Build parent-handle lookup so each TweetCard renders "Replying to @x".
   const parentHandleOf = (parentId: string): string | undefined => {
     if (parentId === "seed") return undefined;
-    const parentPost = posts.find((p) => p.id === parentId);
+    const parentPost = events.find((p) => p.id === parentId);
     if (!parentPost) return undefined;
     const ag = lookup(parentPost.agent);
     return ag?.handle;
   };
 
-  // Perf scope-down per task brief: only the most recent ~10 posts get the
-  // animated +1 like floaters and grow-in counts. Older posts show their
-  // final like count statically. Caps simultaneous animations regardless of
-  // total post count (rounds=15 ≈ 90 posts).
+  // Perf scope-down: only the most recent N posts (by arrival/round-id order)
+  // get the live heart-pop floaters. Older posts still pick up updated
+  // like_counts on render but suppress floater spawning. At rounds=15 / 90
+  // posts this keeps re-render cost bounded.
   const LIVE_WINDOW = 10;
-  const liveCutoff = Math.max(0, posts.length - LIVE_WINDOW);
+  const arrivalSorted = [...events].sort((a, b) => {
+    if (a.round !== b.round) return a.round - b.round;
+    return a.id.localeCompare(b.id, undefined, { numeric: true });
+  });
+  const liveCutoffIdx = Math.max(0, arrivalSorted.length - LIVE_WINDOW);
+  const liveSet = new Set(arrivalSorted.slice(liveCutoffIdx).map((p) => p.id));
+
+  // FLIP-based animated re-sort. We snapshot top-level group positions on
+  // every layout pass; when sortMode flips we use the previous snapshot as
+  // the "from" position and animate to the current ("to") via CSS transform.
+  // Top-level cards' descendants live inside the same wrapper so they ride
+  // along with their parent rather than animating independently.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const positionsRef = useRef<Map<string, DOMRect>>(new Map());
+  const prevSortModeRef = useRef<SortMode>(sortMode);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const cards = Array.from(
+      el.querySelectorAll<HTMLDivElement>("[data-thread-group]"),
+    );
+
+    const newPositions = new Map<string, DOMRect>();
+    for (const c of cards) {
+      const id = c.dataset.threadGroup;
+      if (id) newPositions.set(id, c.getBoundingClientRect());
+    }
+
+    if (prevSortModeRef.current !== sortMode) {
+      // FLIP — invert each group to its previous position, then RAF-release.
+      for (const c of cards) {
+        const id = c.dataset.threadGroup;
+        if (!id) continue;
+        const oldPos = positionsRef.current.get(id);
+        const newPos = newPositions.get(id);
+        if (!oldPos || !newPos) continue;
+        const dx = oldPos.left - newPos.left;
+        const dy = oldPos.top - newPos.top;
+        if (dx === 0 && dy === 0) continue;
+        c.style.transition = "none";
+        c.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
+        c.style.willChange = "transform";
+      }
+      // Force reflow so the inverted transform commits before the transition.
+      void el.offsetHeight;
+      requestAnimationFrame(() => {
+        for (const c of cards) {
+          c.style.transition =
+            "transform 600ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+          c.style.transform = "";
+        }
+        // Clean up after the animation settles.
+        window.setTimeout(() => {
+          for (const c of cards) {
+            c.style.transition = "";
+            c.style.willChange = "";
+          }
+        }, 700);
+      });
+    }
+
+    positionsRef.current = newPositions;
+    prevSortModeRef.current = sortMode;
+  });
 
   return (
     <div
@@ -214,11 +282,15 @@ function ThreadColumn({
       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
         <span style={{ fontSize: 14, color: "var(--fg-1)", fontWeight: 600 }}>The thread</span>
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>
-          {posts.length} {posts.length === 1 ? "reply" : "replies"}
+          {events.length} {events.length === 1 ? "reply" : "replies"}
+          {sortMode === "engagement" && (
+            <span style={{ marginLeft: 8, color: "var(--accent-200)" }}>· engagement</span>
+          )}
         </span>
       </div>
 
       <div
+        ref={containerRef}
         style={{
           flex: 1,
           overflowY: "auto",
@@ -251,221 +323,91 @@ function ThreadColumn({
           <div style={{ fontSize: 14, color: "var(--fg-1)", lineHeight: 1.5 }}>{seedDraft}</div>
         </div>
 
-        {posts.map((p, i) => {
-          const ag = lookup(p.agent);
-          if (!ag) return null;
-          const liveAnimations = i >= liveCutoff;
+        {groups.map((group) => {
+          const topAgent = lookup(group.top.agent);
+          if (!topAgent) return null;
           return (
-            <TweetCard
-              key={p.id}
-              post={{
-                id: p.id,
-                parent: p.parent,
-                round: p.round,
-                text: p.text,
-                sentiment: p.sentiment,
-              }}
-              agent={{
-                id: ag.id,
-                name: ag.name,
-                handle: ag.handle,
-                archetype: ag.archetype,
-              }}
-              parentHandle={parentHandleOf(p.parent)}
-              now={now}
-              liveAnimations={liveAnimations}
-            />
+            <div
+              key={group.top.id}
+              data-thread-group={group.top.id}
+              style={{ display: "flex", flexDirection: "column", gap: 6 }}
+            >
+              <TweetCard
+                post={{
+                  id: group.top.id,
+                  parent: group.top.parent,
+                  round: group.top.round,
+                  text: group.top.text,
+                  sentiment: group.top.sentiment,
+                  like_count: group.top.like_count,
+                  reply_count: group.top.reply_count,
+                }}
+                agent={{
+                  id: topAgent.id,
+                  name: topAgent.name,
+                  handle: topAgent.handle,
+                  archetype: topAgent.archetype,
+                }}
+                parentHandle={undefined}
+                now={now}
+                liveAnimations={liveSet.has(group.top.id)}
+              />
+              {group.descendants.length > 0 && (
+                <div
+                  style={{
+                    position: "relative",
+                    marginLeft: 36,
+                    paddingLeft: 12,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  {/* Vertical thread-line connecting top-level avatar to children */}
+                  <span
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: 2,
+                      background: "var(--border)",
+                      borderRadius: 2,
+                    }}
+                  />
+                  {group.descendants.map((d) => {
+                    const ag = lookup(d.agent);
+                    if (!ag) return null;
+                    return (
+                      <TweetCard
+                        key={d.id}
+                        post={{
+                          id: d.id,
+                          parent: d.parent,
+                          round: d.round,
+                          text: d.text,
+                          sentiment: d.sentiment,
+                          like_count: d.like_count,
+                          reply_count: d.reply_count,
+                        }}
+                        agent={{
+                          id: ag.id,
+                          name: ag.name,
+                          handle: ag.handle,
+                          archetype: ag.archetype,
+                        }}
+                        parentHandle={parentHandleOf(d.parent)}
+                        now={now}
+                        liveAnimations={liveSet.has(d.id)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
-      </div>
-    </div>
-  );
-}
-
-function SwarmMap({
-  posts,
-  edges,
-  dogpileIds,
-  running,
-  agents,
-}: {
-  posts: ThreadEvent[];
-  edges: Array<{ from: { x: number; y: number }; to: { x: number; y: number }; sentiment: number }>;
-  dogpileIds: Set<string>;
-  running: boolean;
-  agents: Agent[];
-}) {
-  const VW = 360;
-  const VH = 280;
-  const activeAgents = new Set(posts.map((p) => p.agent));
-  const agentMap = new Map<string, Agent>(agents.map((a) => [a.id, a]));
-  const dogpilePositions = posts
-    .filter((p) => dogpileIds.has(p.id))
-    .map((p) => {
-      const ag = agentMap.get(p.agent);
-      return ag ? agentPoint(ag.id, ag.archetype) : null;
-    })
-    .filter((v): v is { x: number; y: number; color: string } => Boolean(v));
-
-  return (
-    // De-emphasized per Q3 design priority 5: lower overall opacity, smaller
-    // dots, dimmer connecting lines. Thread is the hero now.
-    <div
-      style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: 12,
-        padding: 14,
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-        overflow: "hidden",
-        opacity: 0.78,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <span style={{ fontSize: 13, color: "var(--fg-2)", fontWeight: 500 }}>The room</span>
-        <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>
-          {activeAgents.size} / 200 engaged
-        </span>
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          position: "relative",
-          background:
-            "radial-gradient(circle at center, rgba(212,255,92,0.03) 0%, transparent 65%), var(--bg-deep)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          overflow: "hidden",
-          minHeight: 200,
-        }}
-      >
-        <svg
-          viewBox={`${-VW / 2} ${-VH / 2} ${VW} ${VH}`}
-          width="100%"
-          height="100%"
-          style={{ position: "absolute", inset: 0 }}
-        >
-          {Object.entries(CLUSTER_CENTERS).map(([k, c]) => (
-            <circle key={k} cx={r2(c.x)} cy={r2(c.y)} r={48} fill={c.color} opacity={0.04} />
-          ))}
-
-          {edges.map((e, i) => (
-            <line
-              key={i}
-              x1={r2(e.from.x)}
-              y1={r2(e.from.y)}
-              x2={r2(e.to.x)}
-              y2={r2(e.to.y)}
-              stroke={toneColor(e.sentiment)}
-              strokeWidth={0.5}
-              opacity={0.32}
-            />
-          ))}
-
-          {agents.map((a) => {
-            const p = agentPoint(a.id, a.archetype);
-            const active = activeAgents.has(a.id);
-            return (
-              <g key={a.id}>
-                <circle
-                  cx={r2(p.x)}
-                  cy={r2(p.y)}
-                  r={active ? 2.4 : 1.6}
-                  fill={active ? p.color : "#2e2e34"}
-                  opacity={active ? 0.85 : 0.4}
-                  style={{
-                    animationName: active && running ? "echo-pulse" : "none",
-                    animationDuration: "1.6s",
-                    animationTimingFunction: "cubic-bezier(0.65, 0, 0.35, 1)",
-                    animationIterationCount: "infinite",
-                  }}
-                />
-              </g>
-            );
-          })}
-
-          {Array.from({ length: 80 }).map((_, idx) => {
-            const angle = (idx / 80) * Math.PI * 2 + (idx % 5) * 0.13;
-            const radius = 20 + (idx % 9) * 12;
-            const x = Math.cos(angle) * radius * 1.3;
-            const y = Math.sin(angle) * radius * 1.0;
-            return <circle key={`f${idx}`} cx={r2(x)} cy={r2(y)} r={1} fill="#43434b" opacity={0.4} />;
-          })}
-
-          <circle cx="0" cy="0" r={6} fill="rgba(11,11,12,0.95)" stroke="var(--accent-200)" strokeWidth={1} />
-          <circle
-            cx="0"
-            cy="0"
-            r={2}
-            fill="var(--accent-200)"
-            style={{
-              animationName: "echo-pulse",
-              animationDuration: "1.6s",
-              animationTimingFunction: "cubic-bezier(0.65, 0, 0.35, 1)",
-              animationIterationCount: "infinite",
-            }}
-          />
-
-          {dogpilePositions.map((p, i) => (
-            <circle
-              key={`dp${i}`}
-              cx={r2(p.x)}
-              cy={r2(p.y)}
-              r={8}
-              fill="none"
-              stroke="var(--accent-200)"
-              strokeWidth={0.8}
-              opacity={0.6}
-              style={{
-                animationName: "echo-ripple",
-                animationDuration: "2.4s",
-                animationTimingFunction: "cubic-bezier(0.2, 0.8, 0.2, 1)",
-                animationIterationCount: "infinite",
-                animationDelay: `${(i * 0.3).toFixed(2)}s`,
-                transformOrigin: `${r2(p.x)}px ${r2(p.y)}px`,
-              }}
-            />
-          ))}
-        </svg>
-
-        <div
-          style={{
-            position: "absolute",
-            bottom: 8,
-            left: 8,
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            color: "var(--fg-3)",
-            background: "rgba(7,7,8,0.55)",
-            padding: "4px 8px",
-            borderRadius: 6,
-            border: "1px solid var(--border)",
-          }}
-        >
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span style={{ width: 6, height: 6, borderRadius: 999, background: "#7dd49a" }} /> positive
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span style={{ width: 6, height: 6, borderRadius: 999, background: "#f06c5a" }} /> skeptic
-          </span>
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              paddingLeft: 6,
-              borderLeft: "1px solid var(--border)",
-            }}
-          >
-            <span style={{ width: 8, height: 8, borderRadius: 999, border: "1px solid var(--accent-200)" }} /> your audience
-          </span>
-        </div>
       </div>
     </div>
   );
