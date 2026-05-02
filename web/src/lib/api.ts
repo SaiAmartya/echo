@@ -43,6 +43,11 @@ export interface SimulateStartRequest {
   mode: SimulationMode;
   audience_id?: string;
   rounds: number;
+  // When true, the backend runs one extra Gemini call with google_search
+  // grounding before the rounds so reactions are anchored to recent real-world
+  // facts the swarm model would otherwise miss (e.g. a model release that
+  // postdates training).
+  web_grounding?: boolean;
 }
 
 export interface SimulateStartResponse {

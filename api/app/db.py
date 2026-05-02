@@ -75,6 +75,20 @@ def init_db() -> None:
                 pass  # already migrated
             else:
                 raise
+        # web_grounding toggle — when set, the swarm runs one extra Gemini call
+        # with google_search grounding before the rounds, condenses recent-web
+        # facts into a context blurb, and injects it into every archetype call.
+        # Stored as INTEGER (0/1) for SQLite portability. Idempotent migration.
+        try:
+            conn.execute(
+                "ALTER TABLE simulations ADD COLUMN web_grounding INTEGER NOT NULL DEFAULT 0"
+            )
+            print("schema migration: web_grounding column added to simulations")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                raise
 
 
 @contextmanager
@@ -110,6 +124,7 @@ def insert_simulation(
     draft: str,
     rounds: int,
     mode: str = "business",
+    web_grounding: bool = False,
 ) -> None:
     """Persist a new simulation row scoped to `user_id`.
 
@@ -122,9 +137,9 @@ def insert_simulation(
     """
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds, mode) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (sim_id, user_id, audience_id, draft, rounds, mode),
+            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds, mode, web_grounding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sim_id, user_id, audience_id, draft, rounds, mode, 1 if web_grounding else 0),
         )
 
 

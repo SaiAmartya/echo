@@ -50,6 +50,10 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 # Verified `gemini-3-flash-preview` via Context7 + ai.google.dev/gemini-api/docs/gemini-3
 # (2026-05-02): single model id, thinking enabled via `thinking_config={"thinking_level":...}`.
 GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-flash-preview")
+# Web-grounding model — Flash-Lite doesn't support the google_search tool, so
+# we use the regular Flash for the single grounding pre-call. Output is plain
+# text (response_schema is incompatible with tools=[google_search]).
+GEMINI_GROUNDING_MODEL = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-3-flash-preview")
 # Q1 (2026-05-02): rounds=15 needs 6 archetypes × 15 + 1 analysis + 1 report = 92 calls.
 MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "100"))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_LLM_CALLS", "6"))
@@ -432,9 +436,22 @@ _FEW_SHOT_ANCHOR = (
 )
 
 
-def _system_for(archetype: str) -> str:
+def _system_for(archetype: str, *, web_context: str = "") -> str:
     voice = ARCHETYPE_VOICE[archetype]
+    grounding_block = ""
+    if web_context.strip():
+        # Lives BEFORE the calibration block so the model treats it as
+        # ground-truth setup rather than another rule. The "TREAT AS REAL"
+        # framing is the load-bearing bit: without it, models occasionally
+        # dismiss unfamiliar entities as fictional and react accordingly.
+        grounding_block = (
+            "REAL-WORLD CONTEXT (treat as real, current facts — the input "
+            "references entities/events that postdate your training data; do "
+            "NOT dismiss them as fictional):\n"
+            f"{web_context.strip()}\n\n"
+        )
     return (
+        f"{grounding_block}"
         "You are simulating crowd reactions to an input — sometimes a draft "
         "social post, sometimes a hypothetical scenario someone is asking the "
         "public to weigh in on. You are NOT a chatbot and NOT writing helpful "
@@ -803,6 +820,124 @@ async def _call_gemini_thinking(
     )
 
 
+# ----------------------------------------------------------- web grounding
+# When the user toggles "Web grounding" on, we run ONE extra Gemini call before
+# the rounds with `tools=[Tool(google_search=GoogleSearch())]` so the model can
+# search the live web for context the per-archetype calls would otherwise miss
+# (recent product launches, breaking events, model releases, etc. that postdate
+# the swarm model's training cutoff). The result is condensed to ≤450 chars and
+# injected into every archetype's system prompt + the analysis call's user
+# prompt — agents react to a draft *with* the world-state context, not without.
+#
+# Budget: this call counts toward the per-sim cap (≤100). At rounds=15 the
+# baseline is 92 calls; +1 grounding = 93. Comfortable margin.
+#
+# Notes on the SDK shape (google-genai >= 0.8):
+#   - `response_schema` / `response_mime_type=application/json` are NOT
+#     compatible with tools — the model returns plain text + groundingMetadata.
+#   - Flash-Lite does not support the search tool; we use `gemini-2.5-flash`.
+async def _fetch_web_context(
+    *,
+    draft: str,
+    mode: str,
+    budget: BudgetCounter,
+    client: Any,
+) -> str:
+    """One grounded Gemini call. Returns a short factual blurb (or "" on failure).
+
+    Failures NEVER raise — grounding is best-effort context. If the call times
+    out or the SDK errors, we log and return "" so the simulation proceeds
+    ungrounded rather than crashing the whole sim. BudgetExceededError still
+    propagates (it means the per-sim cap is exhausted, which is a real bug).
+    """
+    if not draft.strip():
+        return ""
+
+    # Lazy import — keeps unit tests SDK-free.
+    try:
+        from google.genai import types as genai_types  # noqa: WPS433
+    except Exception as exc:  # noqa: BLE001
+        log.warning("web_grounding: google-genai types unavailable: %r", exc)
+        return ""
+
+    framing = (
+        "the following hypothetical scenario someone is asking the public to "
+        "weigh in on"
+        if mode == "hypothetical"
+        else "the following draft social post"
+    )
+    system = (
+        "You are a research assistant preparing context for a downstream "
+        "audience-reaction simulation. The simulation's other models may have "
+        "older training data and would otherwise treat any unfamiliar entity, "
+        "person, product, model, event, or claim as fictional or generic.\n\n"
+        "Your job: identify entities/events/claims in the input that may be "
+        "recent (post-training-cutoff) or non-obvious, search the web for them, "
+        "and return a SHORT factual context blurb the downstream models can use "
+        "to react grounded in current reality.\n\n"
+        "OUTPUT RULES:\n"
+        "- Plain text only. No markdown, no headings, no citations, no URLs.\n"
+        "- 2-5 sentences total, ≤450 characters total.\n"
+        "- Lead with the most load-bearing fact (what the entity IS, when it "
+        "happened, key impact). Skip framing like 'Here is context:'.\n"
+        "- If nothing in the input requires fresh context (it's evergreen / "
+        "obviously hypothetical / has no real-world referents), return the "
+        "single word: NONE.\n"
+        "- Do NOT take a stance, do NOT predict reactions, do NOT moralize. "
+        "Facts only — the swarm forms its own opinions."
+    )
+    user = f'Input ({framing}):\n"""\n{draft}\n"""\n\nReturn the context blurb (or NONE).'
+
+    await budget.acquire()
+    try:
+        try:
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.2,
+                max_output_tokens=512,
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+            )
+        except Exception as exc:  # noqa: BLE001 — older SDK shape mismatch
+            log.warning("web_grounding: GoogleSearch tool unavailable: %r", exc)
+            return ""
+
+        try:
+            resp = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=GEMINI_GROUNDING_MODEL,
+                    contents=user,
+                    config=config,
+                ),
+                # Search adds latency — Google fetches results then the model
+                # synthesizes. Empirical p95 ≈ 8s; cap at 15s before falling
+                # back to ungrounded.
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("web_grounding: timeout after 15s — proceeding ungrounded")
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("web_grounding: call failed: %r", exc)
+            return ""
+
+        text = (getattr(resp, "text", "") or "").strip()
+    finally:
+        budget.release()
+
+    if not text:
+        return ""
+    # Strip markdown fences / leading labels the model sometimes adds despite
+    # the rules above.
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:[a-zA-Z]+)?\s*|\s*```$", "", text, flags=re.S).strip()
+    if text.upper() == "NONE":
+        return ""
+    # Hard cap so we don't bloat every downstream prompt.
+    if len(text) > 600:
+        text = text[:600].rstrip() + "…"
+    return text
+
+
 # ---------------------------------------------------------------- parsing
 @dataclass(slots=True)
 class Reaction:
@@ -993,8 +1128,9 @@ async def _call_archetype(
     budget: BudgetCounter,
     client: Any,
     mode: str = "business",
+    web_context: str = "",
 ) -> list[Reaction]:
-    system = _system_for(archetype)
+    system = _system_for(archetype, web_context=web_context)
     user = _build_user_prompt(
         draft=draft,
         audience_blurb=audience_blurb,
@@ -1078,6 +1214,7 @@ async def run_simulation(
     seed: int | None = None,
     client: Any | None = None,
     mode: str = "business",
+    web_grounding: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Async generator yielding SSE event dicts for one full simulation.
 
@@ -1102,6 +1239,23 @@ async def run_simulation(
     next_post_id = [1]   # boxed counter
     cumulative: list[dict[str, Any]] = []
 
+    # Web-grounding pre-call: one Gemini call that searches the live web for
+    # context the per-archetype calls would otherwise miss. Failures are
+    # swallowed inside _fetch_web_context so the sim still runs ungrounded.
+    web_context = ""
+    if web_grounding:
+        try:
+            web_context = await _fetch_web_context(
+                draft=draft, mode=mode, budget=budget, client=client
+            )
+            if web_context:
+                log.info("sim %s: web_grounding produced %d chars of context", sim_id, len(web_context))
+        except BudgetExceededError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("sim %s: web_grounding pre-call crashed — proceeding ungrounded", sim_id)
+            web_context = ""
+
     async def _inner() -> AsyncIterator[dict[str, Any]]:
         for round_n in range(1, rounds + 1):
             # v6: prior_top now ranks by engagement_score (like_count +
@@ -1120,6 +1274,7 @@ async def run_simulation(
                         budget=budget,
                         client=client,
                         mode=mode,
+                        web_context=web_context,
                     )
                     for arc in ARCHETYPES
                 ],
@@ -1172,6 +1327,7 @@ async def run_simulation(
             audience=audience,
             budget=budget,
             client=client,
+            web_context=web_context,
         )
         yield {
             "event": "_analysis",  # sentinel — main.py persists then emits done
@@ -1275,6 +1431,7 @@ async def analyze(
     audience: dict[str, Any],
     budget: BudgetCounter,
     client: Any,
+    web_context: str = "",
 ) -> dict[str, Any]:
     """One Gemini call. Returns the wire-shape analysis dict.
 
@@ -1302,7 +1459,15 @@ async def analyze(
         "post. Be honest, specific, terse — never generic, never encouraging. "
         "Output ONLY a compact JSON object. No prose, no markdown fences."
     )
+    grounding_prefix = ""
+    if web_context.strip():
+        grounding_prefix = (
+            "REAL-WORLD CONTEXT (treat as current facts; the draft references "
+            "entities/events that postdate your training data):\n"
+            f"{web_context.strip()}\n\n"
+        )
     user = (
+        f"{grounding_prefix}"
         f'DRAFT:\n"""\n{draft}\n"""\n\n'
         f"AUDIENCE: {audience_blurb}\n\n"
         f"REPLIES (archetype sent: text):\n{replies_block}\n\n"

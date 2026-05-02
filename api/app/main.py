@@ -124,6 +124,11 @@ class SimulateStartRequest(BaseModel):
     # raised in lock-step (swarm.MAX_LLM_CALLS 40 → 100) to fit
     # 6 archetypes × 15 rounds + 1 analysis + 1 report = 92 calls.
     rounds: int = Field(default=5, ge=5, le=15)
+    # When true, the swarm runs one extra Gemini call with google_search
+    # grounding before the rounds, so reactions are anchored to recent
+    # real-world facts the swarm model would otherwise miss. Adds +1 to the
+    # per-sim budget (93/100 worst case at rounds=15).
+    web_grounding: bool = False
 
 
 class SimulateStartResponse(BaseModel):
@@ -319,7 +324,15 @@ def simulate_start(
         stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
 
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, uid, stored_audience_id, req.draft, req.rounds, mode=req.mode)
+    insert_simulation(
+        sim_id,
+        uid,
+        stored_audience_id,
+        req.draft,
+        req.rounds,
+        mode=req.mode,
+        web_grounding=req.web_grounding,
+    )
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
@@ -346,6 +359,9 @@ async def simulate_stream(
 
     draft = sim["draft"]
     rounds = int(sim["rounds"])
+    # Stored as INTEGER 0/1 in SQLite — cast to bool. Defensive default for
+    # rows written before the migration ran.
+    web_grounding = bool(sim.get("web_grounding") or 0)
 
     async def event_gen():
         try:
@@ -355,6 +371,7 @@ async def simulate_stream(
                 audience=audience,
                 rounds=rounds,
                 mode=sim_mode,
+                web_grounding=web_grounding,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})
