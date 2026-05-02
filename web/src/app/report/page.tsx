@@ -11,6 +11,7 @@ import { Frame } from "@/components/Shell";
 import { Badge, Button, Icon } from "@/components/ui/Primitives";
 import { ReportBody } from "@/components/ReportBody";
 import { api, ApiError, type ReportResponse } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 function ReportInner() {
   const router = useRouter();
@@ -188,8 +189,10 @@ function ReportInner() {
 
 export default function ReportPage() {
   return (
-    <Suspense fallback={null}>
-      <ReportInner />
-    </Suspense>
+    <RequireAuth>
+      <Suspense fallback={null}>
+        <ReportInner />
+      </Suspense>
+    </RequireAuth>
   );
 }

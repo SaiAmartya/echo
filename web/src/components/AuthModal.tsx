@@ -1,15 +1,63 @@
 "use client";
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "./ui/Primitives";
+import {
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  friendlyAuthError,
+} from "@/lib/firebase/auth";
 
 export function AuthModal({
   mode = "signin",
   onClose,
+  redirectTo = "/compose",
 }: {
   mode?: "signin" | "signup";
   onClose?: () => void;
+  redirectTo?: string;
 }) {
+  const router = useRouter();
   const isSignup = mode === "signup";
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onSuccess = () => router.replace(redirectTo);
+
+  const onGoogle = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await signInWithGoogle();
+      onSuccess();
+    } catch (err) {
+      setError(friendlyAuthError(err));
+      setBusy(false);
+    }
+  };
+
+  const onEmailSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (isSignup) {
+        await signUpWithEmail(email, password);
+      } else {
+        await signInWithEmail(email, password);
+      }
+      onSuccess();
+    } catch (err) {
+      setError(friendlyAuthError(err));
+      setBusy(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -38,25 +86,27 @@ export function AuthModal({
           position: "relative",
         }}
       >
-        <span
-          onClick={onClose}
-          style={{
-            position: "absolute",
-            top: 14,
-            right: 14,
-            width: 24,
-            height: 24,
-            borderRadius: 999,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--fg-3)",
-            cursor: "pointer",
-            fontSize: 14,
-          }}
-        >
-          ×
-        </span>
+        {onClose && (
+          <span
+            onClick={onClose}
+            style={{
+              position: "absolute",
+              top: 14,
+              right: 14,
+              width: 24,
+              height: 24,
+              borderRadius: 999,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--fg-3)",
+              cursor: "pointer",
+              fontSize: 14,
+            }}
+          >
+            ×
+          </span>
+        )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div
@@ -93,8 +143,7 @@ export function AuthModal({
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <SSOButton label="Continue with Google" icon="g" />
-          <SSOButton label="Continue with X" icon="x" />
+          <SSOButton label="Continue with Google" icon="g" onClick={onGoogle} disabled={busy} />
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -113,17 +162,59 @@ export function AuthModal({
           <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <input type="email" placeholder="you@company.com" style={inputStyle} />
-          <input type="password" placeholder="Password" style={inputStyle} />
-          <Button variant="primary" style={{ width: "100%", justifyContent: "center", marginTop: 4 }}>
-            {isSignup ? "Create account" : "Sign in"}
+        <form onSubmit={onEmailSubmit} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <input
+            type="email"
+            placeholder="you@company.com"
+            style={inputStyle}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            autoComplete="email"
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            style={inputStyle}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            autoComplete={isSignup ? "new-password" : "current-password"}
+            minLength={6}
+          />
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={busy}
+            style={{ width: "100%", justifyContent: "center", marginTop: 4 }}
+          >
+            {busy ? "…" : isSignup ? "Create account" : "Sign in"}
           </Button>
-        </div>
+        </form>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              fontSize: 12,
+              color: "#f06c5a",
+              background: "rgba(240,108,90,0.08)",
+              border: "1px solid rgba(240,108,90,0.35)",
+              borderRadius: 8,
+              padding: "8px 10px",
+            }}
+          >
+            {error}
+          </div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--fg-3)" }}>
-          <span style={{ cursor: "pointer" }}>{isSignup ? "Already have an account? Sign in" : "No account? Sign up"}</span>
-          {!isSignup && <span style={{ cursor: "pointer" }}>Forgot?</span>}
+          <span
+            style={{ cursor: "pointer" }}
+            onClick={() => router.replace(isSignup ? "/signin" : "/signup")}
+          >
+            {isSignup ? "Already have an account? Sign in" : "No account? Sign up"}
+          </span>
         </div>
       </div>
     </div>
@@ -141,9 +232,22 @@ const inputStyle: CSSProperties = {
   outline: "none",
 };
 
-function SSOButton({ label, icon }: { label: string; icon: "g" | "x" }) {
+function SSOButton({
+  label,
+  icon,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  icon: "g" | "x";
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
       style={{
         display: "flex",
         alignItems: "center",
@@ -152,9 +256,13 @@ function SSOButton({ label, icon }: { label: string; icon: "g" | "x" }) {
         borderRadius: 8,
         background: "var(--surface-2)",
         border: "1px solid var(--border)",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.6 : 1,
         fontSize: 13,
         color: "var(--fg-1)",
+        width: "100%",
+        textAlign: "left",
+        fontFamily: "var(--font-sans)",
       }}
     >
       <span
@@ -174,6 +282,6 @@ function SSOButton({ label, icon }: { label: string; icon: "g" | "x" }) {
         {icon === "g" ? "G" : "𝕏"}
       </span>
       <span>{label}</span>
-    </div>
+    </button>
   );
 }

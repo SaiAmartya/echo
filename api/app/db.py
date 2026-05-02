@@ -13,20 +13,24 @@ DB_PATH = Path(os.environ.get("ECHO_DB_PATH", Path(__file__).resolve().parent.pa
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audiences (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     size INTEGER NOT NULL,
     archetypes TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_audiences_user ON audiences(user_id);
 
 CREATE TABLE IF NOT EXISTS simulations (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     audience_id TEXT NOT NULL,
     draft TEXT NOT NULL,
     rounds INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_simulations_user ON simulations(user_id);
 
 CREATE TABLE IF NOT EXISTS round_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +53,26 @@ CREATE TABLE IF NOT EXISTS reports (
     model TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Z1 / v7 (CONTRACTS §§25-30): rich persona pool for the agentic swarm
+-- engine. Populated by api/app/persona_genesis.py on v7 sim start. v6 sims
+-- never write to this table; their replay path falls through to the v6
+-- archetype-batched re-derivation. hot_buttons is a JSON-encoded array
+-- (SQLite has no first-class array type).
+CREATE TABLE IF NOT EXISTS personas (
+    simulation_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    archetype TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    bio TEXT NOT NULL,
+    profession TEXT,
+    hot_buttons TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (simulation_id, persona_id)
+);
+CREATE INDEX IF NOT EXISTS idx_personas_sim ON personas(simulation_id);
 """
 
 
@@ -71,6 +95,18 @@ def init_db() -> None:
                 pass  # already migrated
             else:
                 raise
+        # Z1 / v7 (CONTRACTS §27): per-sim persona_count, NULL for v6 sims and
+        # explicitly-null v7 callers. Same idempotent-migration pattern as `mode`.
+        try:
+            conn.execute(
+                "ALTER TABLE simulations ADD COLUMN persona_count INTEGER"
+            )
+            print("schema migration: persona_count column added to simulations")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass  # already migrated
+            else:
+                raise
 
 
 @contextmanager
@@ -84,22 +120,31 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def insert_audience(audience_id: str, name: str, size: int, archetypes: list[dict[str, Any]]) -> None:
+def insert_audience(
+    audience_id: str,
+    user_id: str,
+    name: str,
+    size: int,
+    archetypes: list[dict[str, Any]],
+) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO audiences (id, name, size, archetypes) VALUES (?, ?, ?, ?)",
-            (audience_id, name, size, json.dumps(archetypes)),
+            "INSERT OR REPLACE INTO audiences (id, user_id, name, size, archetypes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (audience_id, user_id, name, size, json.dumps(archetypes)),
         )
 
 
 def insert_simulation(
     sim_id: str,
+    user_id: str,
     audience_id: str,
     draft: str,
     rounds: int,
     mode: str = "business",
+    persona_count: int | None = None,
 ) -> None:
-    """Persist a new simulation row.
+    """Persist a new simulation row scoped to `user_id`.
 
     v4 (CONTRACTS §§16-19): `mode` is "business" (default, requires a real
     audience_id) or "hypothetical" (uses the GENERAL_PUBLIC_AUDIENCE sentinel).
@@ -110,19 +155,122 @@ def insert_simulation(
     """
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO simulations (id, audience_id, draft, rounds, mode) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (sim_id, audience_id, draft, rounds, mode),
+            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds, mode, persona_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sim_id, user_id, audience_id, draft, rounds, mode, persona_count),
         )
 
 
-def get_simulation(sim_id: str) -> dict[str, Any] | None:
+def get_simulation(sim_id: str, user_id: str) -> dict[str, Any] | None:
+    """Return a simulation row only if it belongs to `user_id`. None otherwise."""
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM simulations WHERE id = ?", (sim_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM simulations WHERE id = ? AND user_id = ?",
+            (sim_id, user_id),
+        ).fetchone()
         return dict(row) if row else None
 
 
-def get_audience(audience_id: str) -> dict[str, Any] | None:
+def get_simulation_unscoped(sim_id: str) -> dict[str, Any] | None:
+    """Internal lookup without user scoping — used by the swarm engine for
+    auto-reports / streaming after the request handler has already verified
+    ownership via get_simulation(sim_id, uid). Never call from user-facing
+    handlers."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM simulations WHERE id = ?", (sim_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_simulation_full_unscoped(sim_id: str) -> dict[str, Any] | None:
+    """Internal: same as get_simulation_full but skips user scoping. Used by
+    the swarm engine's report generator. Never expose to handlers."""
+    with get_conn() as conn:
+        sim_row = conn.execute(
+            "SELECT id, draft, rounds, mode, created_at FROM simulations WHERE id = ?",
+            (sim_id,),
+        ).fetchone()
+        if not sim_row:
+            return None
+
+        latest = conn.execute(
+            "SELECT round, payload FROM round_events WHERE simulation_id = ? "
+            "ORDER BY round DESC, id DESC LIMIT 1",
+            (sim_id,),
+        ).fetchone()
+        posts: list[dict[str, Any]] = []
+        latest_round: int | None = None
+        if latest:
+            latest_round = int(latest["round"])
+            try:
+                payload = json.loads(latest["payload"])
+                if isinstance(payload, dict):
+                    raw_posts = payload.get("posts", [])
+                    if isinstance(raw_posts, list):
+                        posts = raw_posts
+            except (TypeError, ValueError):
+                posts = []
+
+        analysis_row = conn.execute(
+            "SELECT payload FROM analyses WHERE simulation_id = ?",
+            (sim_id,),
+        ).fetchone()
+        analysis: dict[str, Any] | None = None
+        if analysis_row:
+            try:
+                analysis = json.loads(analysis_row["payload"])
+            except (TypeError, ValueError):
+                analysis = None
+
+    rounds = latest_round if latest_round is not None else int(sim_row["rounds"])
+
+    mode_raw = sim_row["mode"] if "mode" in sim_row.keys() else None
+    mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
+
+    return {
+        "simulation_id": sim_row["id"],
+        "draft": sim_row["draft"],
+        "rounds": rounds,
+        "posts": posts,
+        "analysis": analysis,
+        "created_at": _iso_z(sim_row["created_at"]),
+        "mode": mode,
+    }
+
+
+def get_simulation_owner(sim_id: str) -> str | None:
+    """Internal: return the owning user_id for a sim, or None if it doesn't exist.
+    Used by the swarm engine when it generates auto-reports server-side without
+    a request scope. Should NOT be exposed to user-facing handlers."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM simulations WHERE id = ?",
+            (sim_id,),
+        ).fetchone()
+        return row["user_id"] if row else None
+
+
+def get_audience(audience_id: str, user_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name, size, archetypes FROM audiences WHERE id = ? AND user_id = ?",
+            (audience_id, user_id),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "size": row["size"],
+            "archetypes": json.loads(row["archetypes"]),
+        }
+
+
+def get_audience_unscoped(audience_id: str) -> dict[str, Any] | None:
+    """Internal lookup without user scoping — used by the swarm engine when
+    streaming a sim it has already authorized via get_simulation(sim_id, uid).
+    Never call from user-facing handlers."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, name, size, archetypes FROM audiences WHERE id = ?",
@@ -172,6 +320,83 @@ def get_analysis(sim_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM analyses WHERE simulation_id = ?", (sim_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
+
+
+# --------------------------------------------------------------- Z1 personas
+def insert_personas(sim_id: str, personas: list[dict[str, Any]]) -> None:
+    """Persist a v7 persona pool produced by api/app/persona_genesis.
+
+    Idempotent at the (simulation_id, persona_id) primary key — re-running
+    Z1 for the same sim_id replaces the prior pool. Designed for one-shot
+    insertion at sim start; not optimized for incremental writes.
+
+    Each persona dict must carry: persona_id, name, handle, archetype,
+    audience, bio, profession (str | None), hot_buttons (list[str]).
+    """
+    if not personas:
+        return
+    rows: list[tuple[Any, ...]] = []
+    for p in personas:
+        hot_buttons = p.get("hot_buttons") or []
+        if not isinstance(hot_buttons, list):
+            hot_buttons = []
+        rows.append(
+            (
+                sim_id,
+                p["persona_id"],
+                p["name"],
+                p["handle"],
+                p["archetype"],
+                p["audience"],
+                p.get("bio") or "",
+                p.get("profession"),
+                json.dumps(hot_buttons),
+            )
+        )
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO personas "
+            "(simulation_id, persona_id, name, handle, archetype, audience, "
+            "bio, profession, hot_buttons) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
+def get_personas(sim_id: str) -> list[dict[str, Any]]:
+    """Return the persisted persona pool for a sim, or [] if none.
+
+    Z2 will read this on the v7 round path; Z1 only writes (verifier reads
+    via raw sqlite). hot_buttons is decoded back to a list[str].
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT persona_id, name, handle, archetype, audience, bio, "
+            "profession, hot_buttons FROM personas "
+            "WHERE simulation_id = ? ORDER BY persona_id",
+            (sim_id,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            hot_buttons = json.loads(row["hot_buttons"]) if row["hot_buttons"] else []
+        except (TypeError, ValueError):
+            hot_buttons = []
+        if not isinstance(hot_buttons, list):
+            hot_buttons = []
+        out.append(
+            {
+                "persona_id": row["persona_id"],
+                "name": row["name"],
+                "handle": row["handle"],
+                "archetype": row["archetype"],
+                "audience": row["audience"],
+                "bio": row["bio"] or "",
+                "profession": row["profession"],
+                "hot_buttons": hot_buttons,
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------- v3 reports
@@ -259,8 +484,9 @@ def _latest_round_payload(conn: sqlite3.Connection, sim_id: str) -> dict[str, An
         return None
 
 
-def list_simulations(limit: int) -> list[dict[str, Any]]:
-    """List simulations newest first with analysis-derived stats.
+def list_simulations(user_id: str, limit: int) -> list[dict[str, Any]]:
+    """List simulations newest first with analysis-derived stats, scoped to one
+    user.
 
     Per CONTRACTS v2 §8: each row carries a 240-char draft preview, post_count
     and mean_sentiment computed from the latest cumulative `round_events.payload`,
@@ -283,10 +509,11 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
                    a.payload     AS analysis_payload
             FROM simulations s
             LEFT JOIN analyses a ON a.simulation_id = s.id
+            WHERE s.user_id = ?
             ORDER BY s.rowid DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, limit),
         ).fetchall()
 
         for row in rows:
@@ -333,8 +560,9 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
     return items
 
 
-def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
-    """Return the full final state of a simulation for /simulate/replay.
+def get_simulation_full(sim_id: str, user_id: str) -> dict[str, Any] | None:
+    """Return the full final state of a simulation for /simulate/replay,
+    scoped to `user_id`.
 
     Shape (CONTRACTS v2 §9):
       { simulation_id, draft, rounds, posts[], analysis|None, created_at }
@@ -346,8 +574,9 @@ def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
     """
     with get_conn() as conn:
         sim_row = conn.execute(
-            "SELECT id, draft, rounds, mode, created_at FROM simulations WHERE id = ?",
-            (sim_id,),
+            "SELECT id, draft, rounds, mode, created_at FROM simulations "
+            "WHERE id = ? AND user_id = ?",
+            (sim_id, user_id),
         ).fetchone()
         if not sim_row:
             return None

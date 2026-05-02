@@ -533,3 +533,94 @@ This is a **prompt change**, not a wire change. FE/BE wire shapes unchanged.
 ---
 
 **v6 LOCKED — 2026-05-02.** Implementations: backend in `swarm.py` engagement algorithm; frontend in `SwarmThread.tsx` indented tree + engagement re-sort.
+
+
+---
+
+## v7 (LOCKED — 2026-05-02): agentic per-persona swarm ("Crowd v7")
+
+The engine moves from "6 archetype LLM batches per round" to "per-persona-per-round LLM agents." Personas gain rich profiles (bio, profession, hot-buttons) and make their own decisions each round (post / reply / like / skip). Engagement becomes LLM-emergent. v6 path remains for backward-compat (gated behind `ECHO_ENGINE_VERSION` env).
+
+### § 25. Post.agent — additive profile fields
+
+```ts
+{
+  // ... existing v1 §3 + v4/v6 fields unchanged ...
+  "agent": {
+    "id": string,
+    "name": string,
+    "handle": string,
+    "archetype": "skeptic" | "enthusiast" | "curious" | "practitioner" | "pedant" | "lurker",
+    "audience": "target" | "public",
+    "bio": string,                       // NEW v7 — short voice descriptor (60-120 chars). Empty string for v1-v6 replays.
+    "profession": string | null,         // NEW v7 — single concise descriptor; null for v1-v6 replays.
+    "hot_buttons": string[] | null       // NEW v7 — 1-3 issues this persona cares about; null for v1-v6 replays.
+  }
+}
+```
+
+All three new fields are **optional on read** for backward compat. Old FE silently ignores them; new FE surfaces them via tooltip / panel.
+
+### § 26. Engagement provenance
+
+- **v6 sims (existing data)**: `like_count` + `reply_count` are re-derived at SSE emit / replay time via the deterministic R1 algorithm in `attach_engagement` (CONTRACTS §22). Unchanged.
+- **v7 sims (new data)**: `like_count` is the **sum of LLM-decided per-persona likes** for each post, optionally multiplied by `_LIKE_DISPLAY_MULTIPLIER` (server-side display knob, default 1). `reply_count` unchanged (children count).
+- The wire shape is identical regardless of provenance. FE need not branch on engine version.
+
+### § 27. POST /simulate/start — additive request field
+
+```ts
+// Request superset of v6
+{
+  "draft": string,
+  "mode": "business" | "hypothetical",
+  "audience_id": string | null,
+  "rounds": number,                    // [5, 15] (v5 §20)
+  "persona_count": number | null       // NEW v7 — int [30, 100], default 50 (v7 only); null/absent → 50 (v7) or ignored (v6)
+}
+```
+
+`persona_count` only takes effect when `ECHO_ENGINE_VERSION=v7`. Server-side default = 50 when v7 + null. Out-of-range values return 422.
+
+### § 28. Replay payload format
+
+For v7 sims, `round_events.payload` JSON gains a sibling field alongside the existing `posts`/`round`/`of`:
+
+```ts
+{
+  "round": number,
+  "of": number,
+  "posts": [...],                      // unchanged shape
+  "persona_actions": [                  // NEW v7 — per-persona decision log for this round
+    {
+      "persona_id": string,
+      "action": "post" | "reply" | "skip",
+      "text": string | null,
+      "replying_to": string | null,
+      "sentiment": number | null,
+      "likes_given": string[]          // post ids; max 5
+    },
+    ...
+  ]
+}
+```
+
+This guarantees **replay parity**: the v7 round-event JSON contains the full LLM decision trace; replay re-renders directly from disk with no LLM re-run (L22 — determinism = persistence for v7). v6 round events lack `persona_actions` and replay falls through to the R1 deterministic re-derivation.
+
+### § 29. Engine versioning (operational)
+
+- `ECHO_ENGINE_VERSION` env var, values `"v6"` | `"v7"`. Default `"v6"` until Z2 verification passes.
+- v6 sims and v7 sims **coexist in the same DB**. Routing on engine version is internal to the engine; the wire shape is the same.
+- Replay handler routes on whether `round_events.payload` contains `persona_actions` (v7) or not (v6). No new DB columns needed beyond Z1's `personas` table.
+
+### § 30. Backward compatibility
+
+- All v1-v6 wire shapes preserved.
+- `agent.bio` / `agent.profession` / `agent.hot_buttons` default to empty/null for v1-v6 replays. New FE tolerates absence.
+- `persona_count` is optional; v6 callers ignore it.
+- `_LIKE_DISPLAY_MULTIPLIER` is internal (never on the wire).
+- Existing `personas` table introduced in Z1 is opt-in (only populated for v7 sims).
+
+---
+
+**v7 LOCKED — 2026-05-02.** Implementations land in Phases Z1 (persona genesis + persistence), Z2 (engine rewrite), Z3 (FE surfacing). Engine flag enables instant rollback.

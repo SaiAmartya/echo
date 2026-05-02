@@ -1,7 +1,8 @@
 "use client";
 import type { ReactNode, CSSProperties } from "react";
-import { Avatar, Eyebrow } from "./ui/Primitives";
+import { Eyebrow } from "./ui/Primitives";
 import { Sidebar, type SidebarKey } from "./Sidebar";
+import { UserMenu } from "./auth/UserMenu";
 
 // ─────────────────────────────────────────────────────────────
 // Frame — dark app shell wrapper used by every view.
@@ -67,7 +68,7 @@ function FrameTopBar({ label, right }: { label?: ReactNode; right?: ReactNode })
       </span>
       {right}
       <div style={{ flex: 1 }} />
-      <Avatar initials="ED" size={28} />
+      <UserMenu />
     </div>
   );
 }

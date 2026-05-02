@@ -1,16 +1,18 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { AuthProvider } from "@/components/auth/AuthProvider";
 
 export const metadata: Metadata = {
-  title: "Echo — Pre-flight check for social posts",
-  description:
-    "Paste a draft. 200 agents, seeded from your real audience, run a 60-second simulated thread.",
+  title: "Echo — What would happen if...",
+  description: "Simulate public reaction to anything.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }

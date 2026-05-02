@@ -22,6 +22,7 @@ import {
   type SimulationMode,
   type StreamErrorEvent,
 } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 const MODE_STORAGE_KEY = "echo:mode";
 
@@ -269,9 +270,10 @@ function SimulatingInner() {
     }
 
     // ---------- Live mode: open EventSource against /simulate/stream.
-    const url = api.simulateStreamUrl(id);
-    const es = new EventSource(url);
-    sourceRef.current = es;
+    // Stream URL is async because we attach a Firebase ID token via query param
+    // (EventSource can't send Authorization headers).
+    let cancelledLive = false;
+    let es: EventSource | null = null;
 
     const onRound = (ev: MessageEvent<string>) => {
       try {
@@ -285,7 +287,7 @@ function SimulatingInner() {
 
     const onDone = () => {
       doneSeenRef.current = true;
-      es.close();
+      es?.close();
       if (queueRef.current.length === 0 && !drainTimerRef.current) {
         finish();
       }
@@ -299,7 +301,7 @@ function SimulatingInner() {
         setError({ code: "internal_error", message: "Unknown stream error." });
       }
       setRunning(false);
-      es.close();
+      es?.close();
       if (drainTimerRef.current) {
         clearTimeout(drainTimerRef.current);
         drainTimerRef.current = null;
@@ -307,19 +309,32 @@ function SimulatingInner() {
     };
 
     const onConnectionError = () => {
-      if (es.readyState === EventSource.CLOSED && !error && !done && !doneSeenRef.current) {
+      if (
+        es &&
+        es.readyState === EventSource.CLOSED &&
+        !error &&
+        !done &&
+        !doneSeenRef.current
+      ) {
         setError({ code: "internal_error", message: "Connection to simulation closed unexpectedly." });
         setRunning(false);
       }
     };
 
-    es.addEventListener("round", onRound as EventListener);
-    es.addEventListener("done", onDone as EventListener);
-    es.addEventListener("error", onErrorEvent as EventListener);
-    es.onerror = onConnectionError;
+    void (async () => {
+      const url = await api.simulateStreamUrl(id);
+      if (cancelledLive) return;
+      es = new EventSource(url);
+      sourceRef.current = es;
+      es.addEventListener("round", onRound as EventListener);
+      es.addEventListener("done", onDone as EventListener);
+      es.addEventListener("error", onErrorEvent as EventListener);
+      es.onerror = onConnectionError;
+    })();
 
     return () => {
-      es.close();
+      cancelledLive = true;
+      es?.close();
       sourceRef.current = null;
       if (drainTimerRef.current) {
         clearTimeout(drainTimerRef.current);
@@ -486,8 +501,10 @@ function SimulatingInner() {
 
 export default function SimulatingPage() {
   return (
-    <Suspense fallback={null}>
-      <SimulatingInner />
-    </Suspense>
+    <RequireAuth>
+      <Suspense fallback={null}>
+        <SimulatingInner />
+      </Suspense>
+    </RequireAuth>
   );
 }
