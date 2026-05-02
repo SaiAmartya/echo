@@ -65,6 +65,7 @@ function SimulatingInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const id = searchParams.get("id");
+  const isReplay = searchParams.get("replay") === "1";
 
   const [round, setRound] = useState(1);
   const [maxRounds, setMaxRounds] = useState<number>(DEFAULT_ROUNDS);
@@ -87,12 +88,14 @@ function SimulatingInner() {
   const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Pull initial total rounds from sessionStorage if present (so the topbar
-  // doesn't briefly say "of 5" when the user picked 3).
+  // doesn't briefly say "of 5" when the user picked 3). Skipped in replay mode
+  // — replay reads draft + rounds from the server payload instead.
   useEffect(() => {
+    if (isReplay) return;
     const sim = loadSimulation();
     if (sim && typeof sim.rounds === "number") setMaxRounds(sim.rounds);
     setDraft(loadDraft());
-  }, []);
+  }, [isReplay]);
 
   useEffect(() => {
     if (!id) {
@@ -101,27 +104,31 @@ function SimulatingInner() {
       return;
     }
 
-    const url = api.simulateStreamUrl(id);
-    const es = new EventSource(url);
-    sourceRef.current = es;
-
-    // Reset pacing state on (re)mount.
+    // Reset pacing state on (re)mount, regardless of mode.
     queueRef.current = [];
     doneSeenRef.current = false;
     lastAppliedAtRef.current = 0;
     if (drainTimerRef.current) clearTimeout(drainTimerRef.current);
     if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
 
-    const finishWithLinger = () => {
-      if (redirectTimerRef.current) return;          // already scheduled
+    // ---- Shared paced-ingest machinery (used by both live SSE and replay).
+    // In live mode the finish step closes the EventSource and schedules a
+    // 2s linger before redirecting to /results. In replay mode we just settle
+    // into the "done" state and let the user press "Back to results" — no
+    // redirect, nothing to close.
+    const finish = () => {
+      if (redirectTimerRef.current) return;
       setRunning(false);
       setDone(true);
-      es.close();
-      sourceRef.current = null;
-      // Linger so the user sees the final round + completed swarm settle.
-      redirectTimerRef.current = setTimeout(() => {
-        router.push(`/results?id=${encodeURIComponent(id)}`);
-      }, DONE_LINGER_MS);
+      if (sourceRef.current) {
+        sourceRef.current.close();
+        sourceRef.current = null;
+      }
+      if (!isReplay) {
+        redirectTimerRef.current = setTimeout(() => {
+          router.push(`/results?id=${encodeURIComponent(id)}`);
+        }, DONE_LINGER_MS);
+      }
     };
 
     const drain = () => {
@@ -132,29 +139,72 @@ function SimulatingInner() {
         setMaxRounds(next.of);
         setPosts(next.posts);
         lastAppliedAtRef.current = Date.now();
-        // Schedule the next drain. If the queue already has more items, wait
-        // the full minimum gap. If it's empty, we'll be re-armed by onRound.
         if (queueRef.current.length > 0) {
           drainTimerRef.current = setTimeout(drain, MIN_ROUND_VISIBLE_MS);
         } else if (doneSeenRef.current) {
-          // No more rounds inbound and stream closed — finish.
-          // Honor MIN_ROUND_VISIBLE_MS for the just-applied round before linger.
-          drainTimerRef.current = setTimeout(finishWithLinger, MIN_ROUND_VISIBLE_MS);
+          // No more inbound work — finish after honoring this round's gap.
+          drainTimerRef.current = setTimeout(finish, MIN_ROUND_VISIBLE_MS);
         }
         return;
       }
-      // Queue empty.
-      if (doneSeenRef.current) finishWithLinger();
+      if (doneSeenRef.current) finish();
     };
 
     const scheduleDrain = () => {
       if (drainTimerRef.current) return;             // already armed
       const since = Date.now() - lastAppliedAtRef.current;
-      const wait = lastAppliedAtRef.current === 0
-        ? 0                                          // first round paints immediately
-        : Math.max(0, MIN_ROUND_VISIBLE_MS - since);
+      const wait =
+        lastAppliedAtRef.current === 0
+          ? 0                                        // first round paints immediately
+          : Math.max(0, MIN_ROUND_VISIBLE_MS - since);
       drainTimerRef.current = setTimeout(drain, wait);
     };
+
+    // ---------- Replay mode: read persisted sim and feed the same paced queue.
+    if (isReplay) {
+      let cancelled = false;
+      void (async () => {
+        try {
+          const replay = await api.getReplay(id);
+          if (cancelled) return;
+          setDraft(replay.draft);
+          setMaxRounds(replay.rounds);
+          // Partition cumulative posts by round into RoundEvent-shaped slices.
+          // posts[] is sorted (round asc, id asc) per contract; for each round
+          // r we emit the full set of posts where round <= r so the SwarmThread
+          // sees the same cumulative ingest it gets over SSE.
+          const total = replay.rounds;
+          for (let r = 1; r <= total; r += 1) {
+            const slice = replay.posts.filter((p) => p.round <= r);
+            queueRef.current.push({ round: r, of: total, posts: slice });
+          }
+          doneSeenRef.current = true;
+          scheduleDrain();
+        } catch (e) {
+          if (cancelled) return;
+          const message =
+            e instanceof Error ? e.message : "Failed to load replay.";
+          setError({ code: "internal_error", message });
+          setRunning(false);
+        }
+      })();
+      return () => {
+        cancelled = true;
+        if (drainTimerRef.current) {
+          clearTimeout(drainTimerRef.current);
+          drainTimerRef.current = null;
+        }
+        if (redirectTimerRef.current) {
+          clearTimeout(redirectTimerRef.current);
+          redirectTimerRef.current = null;
+        }
+      };
+    }
+
+    // ---------- Live mode: open EventSource against /simulate/stream.
+    const url = api.simulateStreamUrl(id);
+    const es = new EventSource(url);
+    sourceRef.current = es;
 
     const onRound = (ev: MessageEvent<string>) => {
       try {
@@ -169,10 +219,8 @@ function SimulatingInner() {
     const onDone = () => {
       doneSeenRef.current = true;
       es.close();
-      // If queue is empty AND no drain is pending, finish now (with linger).
-      // Otherwise the drain loop will call finishWithLinger when it empties.
       if (queueRef.current.length === 0 && !drainTimerRef.current) {
-        finishWithLinger();
+        finish();
       }
     };
 
@@ -192,8 +240,6 @@ function SimulatingInner() {
     };
 
     const onConnectionError = () => {
-      // EventSource native error (network drop, server closed without `error` event).
-      // If we already saw `done` or a server-emitted error, leave state alone.
       if (es.readyState === EventSource.CLOSED && !error && !done && !doneSeenRef.current) {
         setError({ code: "internal_error", message: "Connection to simulation closed unexpectedly." });
         setRunning(false);
@@ -203,9 +249,6 @@ function SimulatingInner() {
     es.addEventListener("round", onRound as EventListener);
     es.addEventListener("done", onDone as EventListener);
     es.addEventListener("error", onErrorEvent as EventListener);
-    // The DOM-level "error" listener fires for transport-level errors as a plain Event.
-    // EventSource dispatches both — the named "error" event listener above handles
-    // server-emitted `event: error` payloads; this onerror covers transport drops.
     es.onerror = onConnectionError;
 
     return () => {
@@ -221,7 +264,7 @@ function SimulatingInner() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, router]);
+  }, [id, router, isReplay]);
 
   const onPause = () => {
     setRunning(false);
@@ -242,17 +285,20 @@ function SimulatingInner() {
     router.push(`/simulating?id=${encodeURIComponent(id)}&t=${Date.now()}`);
   };
 
+  const baseLabel = error
+    ? "Simulation error"
+    : running
+      ? `Round ${round} of ${maxRounds}`
+      : done
+        ? isReplay
+          ? `Replay · Round ${round} of ${maxRounds}`
+          : "Simulation complete"
+        : "Paused";
+  const topbarLabel = isReplay && !error ? `Replay · Round ${round} of ${maxRounds}` : baseLabel;
+
   return (
     <Frame
-      topbarLabel={
-        error
-          ? "Simulation error"
-          : running
-            ? `Round ${round} of ${maxRounds}`
-            : done
-              ? "Simulation complete"
-              : "Paused"
-      }
+      topbarLabel={topbarLabel}
       sidebarActive="compose"
       topbarRight={
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -317,7 +363,16 @@ function SimulatingInner() {
           />
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          {running ? (
+          {isReplay ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!id}
+              onClick={() => id && router.push(`/results?id=${encodeURIComponent(id)}`)}
+            >
+              Back to results
+            </Button>
+          ) : running ? (
             <Button
               variant="ghost"
               size="sm"

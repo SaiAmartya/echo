@@ -228,6 +228,16 @@ function ResultsInner() {
           <Button variant="ghost" icon={<Icon name="refresh" size={13} />} onClick={() => router.push("/compose")}>
             Re-run
           </Button>
+          <Button
+            variant="ghost"
+            icon={<Icon name="replies" size={13} />}
+            onClick={() =>
+              id && router.push(`/simulating?id=${encodeURIComponent(id)}&replay=1`)
+            }
+            disabled={!id}
+          >
+            View thread again
+          </Button>
           <div style={{ flex: 1 }} />
           <Button variant="secondary" onClick={() => router.push("/compose")}>
             Edit draft

@@ -94,6 +94,34 @@ export interface Analysis {
   worth_reading: WorthReadingChain[];
 }
 
+// v2 §8 — GET /history
+export type HistoryTone = "positive" | "caution" | "danger" | "neutral";
+
+export interface HistoryItem {
+  simulation_id: string;
+  draft: string;
+  rounds: number;
+  post_count: number;
+  tone: HistoryTone;
+  mean_sentiment: number;
+  created_at: string;
+  has_analysis: boolean;
+}
+
+export interface HistoryResponse {
+  items: HistoryItem[];
+}
+
+// v2 §9 — GET /simulate/replay
+export interface ReplayResponse {
+  simulation_id: string;
+  draft: string;
+  rounds: number;
+  posts: ServerPost[];
+  analysis: Analysis | null;
+  created_at: string;
+}
+
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
@@ -168,9 +196,23 @@ export function analyze(simulationId: string): Promise<Analysis> {
   );
 }
 
+export function getHistory(opts?: { limit?: number }): Promise<HistoryResponse> {
+  const limit = opts?.limit;
+  const qs = typeof limit === "number" ? `?limit=${encodeURIComponent(limit)}` : "";
+  return getJson<HistoryResponse>(`/api/history${qs}`);
+}
+
+export function getReplay(simulationId: string): Promise<ReplayResponse> {
+  return getJson<ReplayResponse>(
+    `/api/simulate/replay?simulation_id=${encodeURIComponent(simulationId)}`,
+  );
+}
+
 export const api = {
   seed,
   simulateStart,
   simulateStreamUrl,
   analyze,
+  getHistory,
+  getReplay,
 };
