@@ -1267,7 +1267,7 @@ def _sort_posts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # Z2. The v7 wrapper layers persona-specific anchor (bio, profession,
 # hot-buttons) on top so 50 personas read as 50 different humans.
 
-def _system_for_persona(persona: dict[str, Any], mode: str) -> str:
+def _system_for_persona(persona: dict[str, Any], mode: str, *, web_context: str = "") -> str:
     """Per-persona system prompt for the v7 agentic engine.
 
     Inherits _CALIBRATION_BLOCK + _FEW_SHOT_ANCHOR verbatim from the v6 path.
@@ -1279,6 +1279,11 @@ def _system_for_persona(persona: dict[str, Any], mode: str) -> str:
     `mode` is plumbed for symmetry with v6's `_system_for`; the v7 system
     prompt itself is mode-agnostic — mode-specific framing lives in the user
     prompt header (DRAFT POST vs SCENARIO).
+
+    `web_context` (lead 2026-05-02): when web_grounding is on, the upstream
+    `_fetch_web_context` produces a short factual blurb the model would
+    otherwise miss (post-training-cutoff entities/events). Mirrors the v6
+    `_system_for(...)` integration shape.
     """
     archetype = persona.get("archetype", "curious")
     voice = ARCHETYPE_VOICE.get(archetype, ARCHETYPE_VOICE["curious"])
@@ -1305,7 +1310,17 @@ def _system_for_persona(persona: dict[str, Any], mode: str) -> str:
         "school policy reads different from a paramedic's reaction to the same."
     )
 
+    grounding_block = ""
+    if web_context.strip():
+        grounding_block = (
+            "REAL-WORLD CONTEXT (treat as real, current facts — the input "
+            "references entities/events that postdate your training data; do "
+            "NOT dismiss them as fictional):\n"
+            f"{web_context.strip()}\n\n"
+        )
+
     return (
+        f"{grounding_block}"
         "You are simulating ONE specific person reacting on social media to an "
         "input — sometimes a draft post, sometimes a hypothetical scenario "
         "someone is asking the public to weigh in on. You are NOT a chatbot; "
@@ -1655,6 +1670,7 @@ async def _call_persona(
     persona_memory: str,
     budget: BudgetCounter,
     client: Any,
+    web_context: str = "",
 ) -> PersonaAction:
     """One Gemini-2.5-flash-lite call per persona per round. Returns an
     action dict; falls back to skip on parse / API failure (never raises
@@ -1662,7 +1678,7 @@ async def _call_persona(
     the SSE error event).
     """
     persona_id = persona.get("persona_id") or persona.get("id") or "?"
-    system = _system_for_persona(persona, mode)
+    system = _system_for_persona(persona, mode, web_context=web_context)
     user = _build_persona_user_prompt(
         persona=persona,
         draft=draft,
@@ -2093,6 +2109,7 @@ async def run_simulation(
                         persona_memory=persona_memories[persona["persona_id"]],
                         budget=budget,
                         client=client,
+                        web_context=web_context,
                     )
                     for persona in v7_pool
                 ],
