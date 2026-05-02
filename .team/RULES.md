@@ -1,0 +1,61 @@
+# .team/RULES.md — standing orders for every agent on echo-hackathon
+
+These rules apply to **every agent** spawned into this team, including the team lead. They override default agent behavior. Read this before starting any task.
+
+## R1 — Use up-to-date code and libraries
+
+The user explicitly reinstated this. Before writing or recommending code that touches an external library, framework, SDK, CLI, or API:
+
+- **Prefer Context7's `query-docs` tool** for library documentation. It pulls authoritative current docs.
+- **Use `WebSearch`** for current pricing, breaking changes, deprecations, or release notes (search with the current year — May 2026).
+- **Use `WebFetch`** for a specific URL the user gave you or a doc page Context7 doesn't index.
+- **Do NOT rely on training-data memory** for any of: SDK call signatures, model names, pricing, env-var names, deprecation status, or framework conventions. Verify first.
+
+When you do verify, **say so in your commit message or report-back**: e.g., "google-genai 0.8 SDK shape verified via Context7 query-docs". This lets the team trust the work without re-checking.
+
+## R2 — Hard budget on LLM calls
+
+Echo has a hackathon budget. Limits are LOCKED, not advisory:
+
+- **≤40 Gemini calls per simulation.** Counter raises `BudgetExceededError` on the 41st call. Never silent fan-out.
+- **≤6 concurrent calls** via `asyncio.Semaphore(6)` (process-global).
+- **Model = `gemini-2.5-flash-lite`.** No upgrades without team-lead approval.
+- **≤256 output tokens per call.**
+
+If a phase looks like it'll cost more than its allotted estimate in `.team/STATUS.md` budget ledger, stop and message team-lead before spending.
+
+## R3 — Don't break the locked contract
+
+`.team/CONTRACTS.md` is **LOCKED at v1**. If you find an ambiguity or a real need to change a wire shape:
+
+1. Stop coding.
+2. `SendMessage` to `team-lead` with the proposal.
+3. Wait for arbitration. **Do not silently deviate.**
+
+This is non-negotiable because backend and frontend code in parallel against the same contract.
+
+## R4 — Communicate via SendMessage, not by hoping
+
+Your plain-text output is **not visible** to other agents. To communicate with a teammate or the lead, you must use the `SendMessage` tool. Address by name (`researcher`, `backend-engineer`, `frontend-engineer`, `integrator`, `e2e-tester`, `team-lead`), never by UUID.
+
+## R5 — Idle is not done — done is done
+
+Going idle after a turn is normal — it does not mean your task is finished. Mark a task `completed` via `TaskUpdate` only when:
+
+- All scope items in the task description are addressed.
+- For implementation tasks: code is committed AND the relevant local check passed (typecheck, smoke test, etc.).
+- For research tasks: the deliverable file exists at the spec'd path.
+
+If you can't fully complete the task, leave it `in_progress`, write what's blocking you, and message team-lead.
+
+## R6 — Don't push without lead approval
+
+Each engineer commits locally. **Only the team-lead pushes to GitHub.** This batches related commits and avoids partial states on `main`.
+
+## R7 — Don't touch other agents' working trees
+
+If you see uncommitted files in `api/` and you're the frontend-engineer, leave them alone. The lead reads working-tree state to monitor; engineers commit before passing the baton.
+
+## R8 — Stay scoped
+
+If you discover a refactor opportunity outside your task, write it to `docs/BACKLOG.md` (create if absent) and keep moving. Don't pull yarn threads mid-build during a hackathon.
