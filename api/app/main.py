@@ -61,7 +61,9 @@ app.add_middleware(
 # ------------------------------------------------------------------- models
 class SeedRequest(BaseModel):
     mode: Literal["csv", "oauth", "sample"]
-    payload: str | None = None
+    # Cap payload at ~1 MB so a malicious caller can't make us swallow huge
+    # strings before pydantic gives up (CSV bodies in v1 are tiny).
+    payload: str | None = Field(default=None, max_length=1_000_000)
 
 
 class Archetype(BaseModel):
@@ -77,9 +79,17 @@ class SeedResponse(BaseModel):
     archetypes: list[Archetype]
 
 
+# Format guards — keep in lock-step with /seed (`aud_<10 hex>`) and
+# /simulate/start (`sim_<10 hex>`). Defense-in-depth: parameterized SQL already
+# blocks injection, but rejecting malformed ids at the boundary keeps DB
+# lookups predictable and logs cleaner.
+_AUDIENCE_ID_PATTERN = r"^aud_[0-9a-f]{10}$"
+_SIMULATION_ID_PATTERN = r"^sim_[0-9a-f]{10}$"
+
+
 class SimulateStartRequest(BaseModel):
     draft: str = Field(min_length=1, max_length=1000)
-    audience_id: str
+    audience_id: str = Field(pattern=_AUDIENCE_ID_PATTERN)
     rounds: int = Field(default=5, ge=3, le=6)
 
 
@@ -204,7 +214,9 @@ def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
 
 
 @app.get("/simulate/stream")
-async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceResponse:
+async def simulate_stream(
+    simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+) -> EventSourceResponse:
     sim = get_simulation(simulation_id)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
@@ -268,7 +280,9 @@ async def simulate_stream(simulation_id: str = Query(...)) -> EventSourceRespons
 
 
 @app.get("/analyze", response_model=AnalyzeResponse)
-def analyze(simulation_id: str = Query(...)) -> AnalyzeResponse:
+def analyze(
+    simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+) -> AnalyzeResponse:
     sim = get_simulation(simulation_id)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
@@ -302,7 +316,9 @@ def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
 
 
 @app.get("/simulate/replay", response_model=ReplayResponse)
-def simulate_replay(simulation_id: str = Query(...)) -> ReplayResponse:
+def simulate_replay(
+    simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+) -> ReplayResponse:
     try:
         full = get_simulation_full(simulation_id)
         if full is None:
