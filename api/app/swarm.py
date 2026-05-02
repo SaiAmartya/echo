@@ -73,59 +73,139 @@ ARCHETYPES: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------- archetype voices
+# P6 (realism overhaul, 2026-05-02): voice ≠ valence. Each archetype is described
+# by its *characteristic angle of engagement*, NOT a hardcoded sentiment range.
+# Removing the baked-in floors (was: enthusiast +0.3..+0.9, practitioner -0.1..+0.5)
+# unblocked the model from manufacturing "wow, alternate-history vibes!" reactions
+# to war scenarios. The CALIBRATION block + few-shot anchor in `_system_for` now
+# carry the realism load instead.
 ARCHETYPE_VOICE: dict[str, str] = {
     "skeptic": (
-        "Sharp, dry, low-trust. Calls out marketing language. Not a hater — "
-        "a discerning user who's seen the rodeo before. Pushes back on vague "
-        "claims, founder hubris, and absolutist framing. Profanity OK if it "
-        "lands. Sentiment range -0.7 to -0.1."
+        "Pushes back on hidden assumptions, unstated costs, and over-confident "
+        "framing. Sharp, dry, low-trust. Calls things out — but only when "
+        "they're actually wrong. Not a hater for sport. Profanity OK if it lands."
     ),
     "enthusiast": (
-        "Loud, evangelical, lowercase-by-default. Often the brand's target "
-        "audience. Reacts to new features and the philosophy behind a change "
-        "with 'finally' energy. Sentiment range +0.3 to +0.9."
+        "Sees what the proposal *enables*; reaches for analogies; speaks with "
+        "energy. Lowercase-by-default. NOT a sycophant — bad ideas still land "
+        "badly, and the energy gets redirected into 'no, this is bad because…'."
     ),
     "curious": (
-        "Asks specific, scoped questions. Not skeptical, not sold — wants the "
-        "detail. Cares about edge cases and 'how does this work for X?'. "
-        "Sentiment range -0.2 to +0.3."
+        "Asks the next-level question. Wants the part nobody answered yet. "
+        "Specific, scoped questions about edge cases, implementation, and "
+        "'how does this work for X?'. Neither sold nor skeptical by default."
     ),
     "practitioner": (
-        "Has run this play before. Drops concrete numbers, war stories, what "
-        "stayed and what didn't. Cares about implementation details and what "
-        "the team actually had to change. Sentiment range -0.1 to +0.5."
+        "Talks from experience. Will tell you what *actually* happens when you "
+        "try this in real life. Concrete numbers, war stories, what stayed and "
+        "what didn't. Cares about implementation reality."
     ),
     "pedant": (
-        "Corrects framing, terminology, definitions. Doesn't disagree with "
-        "the outcome — disagrees with how you said it. Cares about wording, "
-        "claims-without-citations, category errors. Sentiment range -0.4 to +0.1."
+        "Cares about wording, framing, definitions, claims-without-citations. "
+        "Doesn't grade vibes; grades precision. Will correct a category error "
+        "even on a take they otherwise agree with."
     ),
     "lurker": (
-        "Short. Reacts more than discusses. One-line takes. Often the first "
-        "to surface a meta-pattern or 'ratio risk'. Cares about vibes and the "
-        "read of the room. Sentiment range -0.3 to +0.3."
+        "One-line takes. Reads the room. Often the first to surface what "
+        "everyone's thinking but won't say. Reacts more than discusses."
     ),
 }
+
+
+# P6: calibration anchor — durable across rounds, lives in the system prompt so
+# the model sees it on every per-archetype call. This is the load-bearing block
+# that breaks the positive-bias prior surfaced by the "US invaded Canada" test.
+_CALIBRATION_BLOCK = (
+    "CALIBRATION — REALISM IS THE BAR:\n"
+    "- Real social-media reactions track the *substance* of what's posted, "
+    "not your archetype's typical optimism level. Your archetype determines "
+    "HOW you sound, not WHAT valence you land on.\n"
+    "- If the input describes harm, violence, deception, ethical violation, "
+    "geopolitical aggression, civilian casualties, financial loss, or anything "
+    "most people would find horrifying — the realistic crowd reaction is "
+    "overwhelming negativity. Skeptics get loud; enthusiasts go silent or "
+    "cautious; practitioners get specific about consequences; pedants flag the "
+    "framing; lurkers post one-line dread. Do NOT manufacture positivity. "
+    "\"Wow, alternate-history vibes!\" in response to a war scenario reads as "
+    "bot-like — never write that.\n"
+    "- If the input is mundane corporate praise-bait, the realistic reaction is "
+    "mixed-with-fatigue: enthusiasts stay mild, skeptics push on the framing, "
+    "lurkers shrug, practitioners say \"we tried this in 2019.\"\n"
+    "- If the input is a genuinely good development (a working vaccine, a "
+    "wrongful conviction overturned, a clear shipped feature) — positive "
+    "reactions are appropriate. But even there, skeptics still find the "
+    "missing-detail and pedants still correct the framing.\n"
+    "- An enthusiast can land at -0.9 toward a war scenario. A skeptic can land "
+    "at +0.6 toward a clear win. Calibrate to the input."
+)
+
+
+# P6: few-shot anchor — three scenarios spanning [-0.9, +0.6] so the model sees
+# the full sentiment range in play and breaks its positive-default prior.
+#
+# Scenario picks DELIBERATELY don't overlap with the canonical user inputs we
+# expect (war-and-geopolitics, product-launches, what-if-policy). When a
+# few-shot scenario is too close to the user's actual scenario, the model
+# copies the example quotes verbatim — the calibration still works but the
+# output reads as canned. So we span the range with off-canon inputs:
+#   1. corporate-misconduct (negative, ≈ -0.85 mean) — calibrates "harm/deception"
+#   2. mundane-internal-tooling (mildly-positive, ≈ +0.4 mean) — calibrates "ok this one's good"
+#   3. urban-policy (mixed, ≈ ±0.1 mean) — calibrates "sit in ambiguity"
+#
+# DO NOT add more examples — too many shots and the model starts mimicking the
+# example phrasing instead of generalizing the pattern. (Tested 3 vs 5; 3 was
+# cleaner.) DO NOT swap these for examples that match likely user inputs —
+# verbatim mimicry returns immediately if you do.
+_FEW_SHOT_ANCHOR = (
+    "EXAMPLES OF REALISTIC CALIBRATION (do NOT copy these — understand the "
+    "pattern; the full sentiment range is in play):\n\n"
+    "Scenario: \"a major bank's CEO orchestrated a five-year emissions-data "
+    "fraud that contributed to dozens of lung-disease deaths\"\n"
+    "- skeptic: \"and the fine will be 0.3% of the profits they made. this is "
+    "the system working as designed.\" (sentiment -0.85)\n"
+    "- enthusiast: \"i don't know how to react to this with anything but "
+    "disgust. who is enthusiastic about manslaughter-by-spreadsheet.\" "
+    "(sentiment -0.9)\n"
+    "- pedant: \"we're calling this 'fraud' but the legal term is criminal "
+    "negligence; either way, dozens dead is the lede.\" (sentiment -0.7)\n\n"
+    "Scenario: \"we redesigned our internal onboarding flow — 4 steps instead "
+    "of 7\"\n"
+    "- enthusiast: \"honestly thank you. the old one made me question my "
+    "career choices.\" (sentiment +0.6)\n"
+    "- skeptic: \"the question isn't 4 vs 7, it's whether the steps you cut "
+    "were the ones that actually mattered.\" (sentiment 0.0)\n"
+    "- lurker: \"good.\" (sentiment +0.3)\n\n"
+    "Scenario: \"every city bans private cars from downtown\"\n"
+    "- practitioner: \"ran the data for two european cities — emissions down "
+    "30%, retail down 12% year one then back up by year three.\" (sentiment +0.1)\n"
+    "- pedant: \"'cars' meaning private vehicles? delivery? buses? emergency? "
+    "an entire policy stack hiding in one word.\" (sentiment -0.15)\n"
+    "- enthusiast: \"every walkable city i've been to is the best part of that "
+    "city. yes please.\" (sentiment +0.55)"
+)
 
 
 def _system_for(archetype: str) -> str:
     voice = ARCHETYPE_VOICE[archetype]
     return (
-        "You are simulating crowd reactions to a draft social post. You are NOT a "
-        "chatbot and NOT writing helpful replies — you are roleplaying real, "
-        "opinionated humans on social media (think reply-guys on X, not Reddit "
-        "moderators).\n\n"
+        "You are simulating crowd reactions to an input — sometimes a draft "
+        "social post, sometimes a hypothetical scenario someone is asking the "
+        "public to weigh in on. You are NOT a chatbot and NOT writing helpful "
+        "replies — you are roleplaying real, opinionated humans on social media "
+        "(think reply-guys on X, not Reddit moderators).\n\n"
         f"You write reactions for ONE specific persona archetype: {archetype}.\n\n"
-        "ARCHETYPE VOICE:\n"
+        "ARCHETYPE VOICE (style only — NOT a sentiment floor):\n"
         f"{voice}\n\n"
+        f"{_CALIBRATION_BLOCK}\n\n"
+        f"{_FEW_SHOT_ANCHOR}\n\n"
         "HARD RULES:\n"
         "- Every reaction is 1-2 sentences max. Tweet-length. Lowercase by default.\n"
         "- No hashtags. No @mentions. No emojis unless it's literally the joke.\n"
         "- Profanity is fine when in-character. Be specific, not generic.\n"
         "- DO NOT explain yourself. DO NOT preface ('Here are reactions:'). DO NOT moralize.\n"
-        "- DO NOT refuse — these are simulated public-square reactions to public posts, "
-        "not real people. If the draft is benign, the skeptic still finds something "
-        "to push back on; that's the archetype.\n"
+        "- DO NOT refuse — these are simulated public-square reactions to public "
+        "posts/scenarios, not real people. If the input is benign, the skeptic "
+        "still finds something to push back on; that's the archetype.\n"
         "- Output ONLY the JSON array described in the user message. No prose, no "
         "markdown fences, no commentary. The first character of your output must be "
         "'[' and the last must be ']'."
@@ -141,12 +221,15 @@ def _build_user_prompt(
     prior_top: list[dict[str, Any]],
     mode: str = "business",
 ) -> str:
-    # v4 (CONTRACTS §§16-19): `mode` is plumbed through so P4/P6 can specialize
-    # copy for hypothetical scenarios. P2 keeps the existing wording for both
-    # modes — engine, prompt, budget, SSE shape all unchanged.
-    _ = mode  # reserved for downstream phase polish
+    # v4 (CONTRACTS §§16-19): `mode` is plumbed through so P6 can specialize copy.
+    # P6 (realism overhaul, 2026-05-02): hypothetical-mode replaces the
+    # "DRAFT POST" / Notion-audience framing with "SCENARIO" / general-public
+    # framing. The audience_blurb arg is ignored when mode="hypothetical" — the
+    # caller still passes one (it's the GENERAL_PUBLIC_AUDIENCE blurb), but we
+    # substitute a fixed line so the model never sees brand-product context for
+    # what-if questions. Business mode is unchanged.
     if round_n == 1 or not prior_top:
-        prior_block = "This is the first round. React directly to the draft."
+        prior_block = "This is the first round. React directly to the input above."
     else:
         lines = [
             f'- id={p["id"]} by {p["agent"]["archetype"]}: "{p["text"]}"'
@@ -157,13 +240,26 @@ def _build_user_prompt(
             "replied-to or highest-engagement) so far:\n\n"
             + "\n".join(lines)
             + "\n\nYou may reply to one of those (use its id as `replying_to`) OR "
-            "react directly to the draft (use null for `replying_to`). You DO NOT "
+            "react directly to the input (use null for `replying_to`). You DO NOT "
             "have to address them — ignore them if your archetype wouldn't engage."
         )
 
+    if mode == "hypothetical":
+        header = (
+            f'SCENARIO:\n"""\n{draft}\n"""\n\n'
+            "AUDIENCE: a slice of the general public on a major social "
+            "platform — mixed ages, geographies, perspectives, online "
+            "savviness, and emotional registers. They are reacting as "
+            "themselves, not as customers of any particular brand.\n\n"
+        )
+    else:
+        header = (
+            f'DRAFT POST:\n"""\n{draft}\n"""\n\n'
+            f"AUDIENCE CONTEXT (who's reading this):\n{audience_blurb}\n\n"
+        )
+
     return (
-        f'DRAFT POST:\n"""\n{draft}\n"""\n\n'
-        f"AUDIENCE CONTEXT (who's reading this):\n{audience_blurb}\n\n"
+        f"{header}"
         f"ROUND: {round_n} of {total_rounds}\n\n"
         f"{prior_block}\n\n"
         "OUTPUT FORMAT (strict JSON, no other text):\n"
@@ -1453,18 +1549,41 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
 
     thread_block = _format_thread_for_report(posts)
 
-    system = (
-        "You are a senior PR / communications strategist. Read a 200-persona "
-        "reaction simulation for a draft social post and produce a structured, "
-        "editorial-tone report on how the public will receive it. Be honest, "
-        "specific, and concrete — never generic, never encouraging-by-default. "
-        "Cite quotes verbatim from the thread when grounding claims. "
-        "Output ONLY a single JSON object matching the schema. No prose, no "
-        "markdown fences, no preamble."
-    )
+    # P6 (realism overhaul): mode-aware framing. Hypothetical reports are
+    # commentary on a *scenario* the public is weighing in on; business reports
+    # are commentary on a *draft post* the author is about to publish. The
+    # report schema is unchanged either way; only the prompt framing flips.
+    if mode == "hypothetical":
+        system = (
+            "You are a senior public-opinion analyst. Read a 200-persona "
+            "reaction simulation for a hypothetical scenario someone asked the "
+            "public to weigh in on, and produce a structured, editorial-tone "
+            "report on how the public would actually receive that scenario. "
+            "Be honest, specific, and concrete — never generic, never "
+            "encouraging-by-default. The 'verdict' field judges whether the "
+            "scenario itself would land well (ship), land mixed (revise), or "
+            "land badly (rethink) in the public eye. The 'rewrite_options' "
+            "field offers alternative framings of the SCENARIO question (not "
+            "of a draft post) that would surface clearer public reactions. "
+            "Cite quotes verbatim from the thread when grounding claims. "
+            "Output ONLY a single JSON object matching the schema. No prose, "
+            "no markdown fences, no preamble."
+        )
+        input_header = "## SCENARIO\n"
+    else:
+        system = (
+            "You are a senior PR / communications strategist. Read a 200-persona "
+            "reaction simulation for a draft social post and produce a structured, "
+            "editorial-tone report on how the public will receive it. Be honest, "
+            "specific, and concrete — never generic, never encouraging-by-default. "
+            "Cite quotes verbatim from the thread when grounding claims. "
+            "Output ONLY a single JSON object matching the schema. No prose, no "
+            "markdown fences, no preamble."
+        )
+        input_header = "## DRAFT POST\n"
 
     user = (
-        "## DRAFT POST\n"
+        f"{input_header}"
         f'"""\n{draft}\n"""\n\n'
         f"## AUDIENCE\n{audience_blurb}\n"
         f"(label: {audience_label})\n\n"
