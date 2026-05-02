@@ -180,6 +180,52 @@ html, body {
   to   { opacity: 0; transform: translateY(-2px); }
 }
 
+/* ---- Pre-stream skeleton loader: shimmering placeholder cards + rotating
+   "echo agents …" status line. Shown when the simulation has been kicked
+   off but the first round event hasn't landed yet. Duration of one full
+   shimmer sweep is intentionally slow (1.8s) so it reads as breathing
+   rather than thrashing. */
+@keyframes echo-skeleton-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+@keyframes echo-skeleton-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+@keyframes echo-status-cycle-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.echo-skel-line {
+  height: 10px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 0%,
+    var(--border-strong, var(--border)) 45%,
+    var(--surface-2) 90%
+  );
+  background-size: 200% 100%;
+  animation: echo-skeleton-shimmer 1.8s linear infinite;
+}
+.echo-skel-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 0%,
+    var(--border-strong, var(--border)) 45%,
+    var(--surface-2) 90%
+  );
+  background-size: 200% 100%;
+  animation: echo-skeleton-shimmer 1.8s linear infinite,
+             echo-skeleton-breathe 2.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
 .echo-tweet {
   position: relative;
   border: 1px solid var(--border);

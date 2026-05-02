@@ -36,6 +36,21 @@ const INITIAL_REPLY_COUNT = 2;     // children shown before fade kicks in
 const FADE_OPACITY_START = 0.6;    // where the second card's fade-out starts (0..1)
 const EXPAND_DURATION_MS = 200;    // slide-down animation duration (ms)
 
+// Pre-stream skeleton — rotating creative status messages shown while the
+// thread waits on its very first round event. "waking up" always lands
+// first; the rest progress on a steady cadence so the user perceives
+// activity even before the swarm streams. Cadence is tuned so the user
+// rarely reaches the 5th line before round 1 begins (~12s envelope).
+const SKELETON_STATUS_LINES = [
+  "echo agents waking up…",
+  "echo agents reading the room…",
+  "echo agents thinking…",
+  "echo agents responding…",
+  "echo agents scrolling…",
+] as const;
+const SKELETON_LINE_DURATION_MS = 2600;
+const SKELETON_CARD_COUNT = 3;
+
 type AudienceKind = "target" | "public";
 
 type Agent = {
@@ -372,6 +387,8 @@ function ThreadColumn({
           <div style={{ fontSize: 14, color: "var(--fg-1)", lineHeight: 1.5 }}>{seedDraft}</div>
         </div>
 
+        {groups.length === 0 && <ThreadSkeleton />}
+
         {groups.map((group) => {
           const topAgent = lookup(group.top.agent);
           if (!topAgent) return null;
@@ -525,6 +542,148 @@ function ThreadColumn({
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// Pre-stream placeholder. Renders a small stack of shimmering skeleton cards
+// + a single rotating creative status line ("echo agents waking up…" →
+// "reading…" → "thinking…" → "responding…"). Mounted by ThreadColumn whenever
+// `groups.length === 0`, so it auto-vanishes the moment the first real
+// TweetCard renders.
+function ThreadSkeleton() {
+  const [lineIdx, setLineIdx] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setLineIdx((i) => Math.min(i + 1, SKELETON_STATUS_LINES.length - 1));
+    }, SKELETON_LINE_DURATION_MS);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const line = SKELETON_STATUS_LINES[lineIdx];
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        animation: "echo-card-fade-in 240ms var(--ease-out) both",
+      }}
+    >
+      {Array.from({ length: SKELETON_CARD_COUNT }).map((_, i) => {
+        // Match TweetCard ratios: 2-3 body lines (varied), header row with
+        // name + handle + ts pills, and a 4-icon action row at the bottom.
+        const bodyLineWidths =
+          i === 0
+            ? ["96%", "82%"]
+            : i === 1
+              ? ["98%", "92%", "64%"]
+              : ["88%", "70%"];
+        return (
+          <div
+            key={i}
+            style={{
+              background: "var(--bg-deep)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: "12px 14px",
+              display: "flex",
+              gap: 12,
+              opacity: 1 - i * 0.16,
+            }}
+          >
+            <div className="echo-skel-avatar" />
+            <div
+              style={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+                minWidth: 0,
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <div
+                  className="echo-skel-line"
+                  style={{ width: 96, height: 12 }}
+                />
+                <div
+                  className="echo-skel-line"
+                  style={{ width: 110, height: 11, opacity: 0.55 }}
+                />
+                <div
+                  className="echo-skel-line"
+                  style={{ width: 22, height: 10, opacity: 0.4 }}
+                />
+              </div>
+              <div
+                style={{ display: "flex", flexDirection: "column", gap: 6 }}
+              >
+                {bodyLineWidths.map((w, j) => (
+                  <div
+                    key={j}
+                    className="echo-skel-line"
+                    style={{ width: w, height: 12 }}
+                  />
+                ))}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 28,
+                  marginTop: 2,
+                }}
+              >
+                {Array.from({ length: 4 }).map((_, k) => (
+                  <div
+                    key={k}
+                    className="echo-skel-line"
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: 999,
+                      opacity: 0.45,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 10,
+          marginTop: 6,
+          minHeight: 22,
+        }}
+      >
+        <span className="echo-typing-dots" aria-hidden>
+          <span className="echo-typing-dot" />
+          <span className="echo-typing-dot" />
+          <span className="echo-typing-dot" />
+        </span>
+        <span
+          key={line}
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            color: "var(--fg-3)",
+            letterSpacing: "0.01em",
+            animation: "echo-status-cycle-in 320ms var(--ease-out) both",
+          }}
+        >
+          {line}
+        </span>
       </div>
     </div>
   );

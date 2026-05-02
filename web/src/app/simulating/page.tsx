@@ -473,13 +473,6 @@ function SimulatingInner() {
     );
   };
 
-  const onUseRewrite = (text: string) => {
-    if (typeof window !== "undefined") {
-      window.sessionStorage.setItem("echo:draft", text);
-    }
-    router.push("/compose");
-  };
-
   const onFullscreen = () => {
     if (!id) return;
     router.push(`/report?id=${encodeURIComponent(id)}`);
@@ -507,7 +500,6 @@ function SimulatingInner() {
       report={report}
       onRetry={() => id && kickReport(id)}
       onFullscreen={onFullscreen}
-      onUseRewrite={onUseRewrite}
       canRetry={Boolean(id)}
     />
   ) : undefined;

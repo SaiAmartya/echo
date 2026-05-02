@@ -25,3 +25,4 @@ api/echo.db-*
 
 # build artifacts
 *.tsbuildinfo
+web/pw-admin-panel-firebase-adminsdk-fbsvc-a2a2cd7ee1.json

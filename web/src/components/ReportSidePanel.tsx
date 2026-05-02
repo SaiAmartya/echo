@@ -24,14 +24,12 @@ export function ReportSidePanel({
   report,
   onRetry,
   onFullscreen,
-  onUseRewrite,
   canRetry,
 }: {
   phase: SidePanelPhase;
   report: ReportResponse | null;
   onRetry: () => void;
   onFullscreen: () => void;
-  onUseRewrite: (text: string) => void;
   canRetry: boolean;
 }) {
   if (phase === "ready" && report) {
@@ -51,7 +49,7 @@ export function ReportSidePanel({
       >
         <FullscreenIconButton onClick={onFullscreen} />
         <div style={{ flex: 1, overflowY: "auto", paddingRight: 4 }}>
-          <ReportBody report={report.report} onUseRewrite={onUseRewrite} />
+          <ReportBody report={report.report} />
         </div>
       </div>
     );

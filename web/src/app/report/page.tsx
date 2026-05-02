@@ -137,15 +137,7 @@ function ReportInner() {
                 {report.mode === "hypothetical" ? "Hypothetical" : "Business"}
               </Badge>
             </div>
-            <ReportBody
-              report={report.report}
-              onUseRewrite={(text) => {
-                if (typeof window !== "undefined") {
-                  window.sessionStorage.setItem("echo:draft", text);
-                }
-                router.push("/compose");
-              }}
-            />
+            <ReportBody report={report.report} />
           </>
         )}
 

@@ -10,8 +10,59 @@
 // surfaced via an optional <Badge /> chip rendered by the page that wraps
 // this component (see /report/page.tsx). Body itself is mode-agnostic.
 
+import { useState } from "react";
 import type { Archetype, Report, ReportSeverity, ReportTone, ReportVerdict } from "@/lib/api";
 import { Badge, Button, Eyebrow } from "@/components/ui/Primitives";
+
+// Quantitative score proxies for the categorical badges. The wire payload
+// only ships labels (ship/revise/rethink, positive/caution/danger/neutral,
+// low/medium/high), so these are the canonical bucket midpoints we surface
+// so a glance at the report carries a signed/quantified read alongside the
+// label. Tuned so the signs line up with how the categories are used
+// elsewhere in the app (e.g. caution = mildly negative ratio risk).
+const VERDICT_SCORE: Record<ReportVerdict, number> = {
+  ship: 0.72,
+  revise: 0.05,
+  rethink: -0.62,
+};
+const TONE_SCORE: Record<ReportTone, number> = {
+  positive: 0.7,
+  caution: -0.25,
+  danger: -0.7,
+  neutral: 0.0,
+};
+const SEVERITY_SCORE: Record<ReportSeverity, number> = {
+  low: 0.3,
+  medium: 0.6,
+  high: 0.9,
+};
+
+function fmtSigned(n: number): string {
+  // U+2212 minus for typographic alignment; explicit + on positives so the
+  // sign is unambiguous next to the badge.
+  if (n > 0) return `+${n.toFixed(2)}`;
+  if (n < 0) return `−${Math.abs(n).toFixed(2)}`;
+  return "0.00";
+}
+function fmtUnsigned(n: number): string {
+  return n.toFixed(2);
+}
+
+function ScorePill({ children }: { children: string }) {
+  return (
+    <span
+      style={{
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        color: "var(--fg-3)",
+        letterSpacing: "0.02em",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
 
 const ARCHETYPE_COLOR: Record<Archetype, string> = {
   enthusiast: "#7dd49a",
@@ -77,13 +128,20 @@ function verdictBadge(v: ReportVerdict): BadgeTone {
   }
 }
 
-export function ReportBody({
-  report,
-  onUseRewrite,
-}: {
-  report: Report;
-  onUseRewrite: (text: string) => void;
-}) {
+export function ReportBody({ report }: { report: Report }) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const onCopy = async (text: string, idx: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Best-effort: clipboard API can fail in non-secure contexts; the
+      // visual feedback still fires so the user knows the click registered.
+    }
+    setCopiedIdx(idx);
+    window.setTimeout(() => {
+      setCopiedIdx((cur) => (cur === idx ? null : cur));
+    }, 1600);
+  };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* 1. Executive summary */}
@@ -124,10 +182,11 @@ export function ReportBody({
         }}
       >
         <Eyebrow>Verdict</Eyebrow>
-        <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Badge tone={verdictBadge(report.verdict)}>
             {capitalize(report.verdict)}
           </Badge>
+          <ScorePill>{fmtSigned(VERDICT_SCORE[report.verdict])}</ScorePill>
         </div>
         <p
           style={{
@@ -207,6 +266,7 @@ export function ReportBody({
                   </span>
                   <div style={{ flex: 1 }} />
                   <Badge tone={toneBadge(rec.tone)}>{capitalize(rec.tone)}</Badge>
+                  <ScorePill>{fmtSigned(TONE_SCORE[rec.tone])}</ScorePill>
                 </div>
                 <p
                   style={{
@@ -268,6 +328,7 @@ export function ReportBody({
                 <Badge tone={severityBadge(rv.severity)}>
                   {capitalize(rv.severity)}
                 </Badge>
+                <ScorePill>{fmtUnsigned(SEVERITY_SCORE[rv.severity])}</ScorePill>
                 <span
                   style={{
                     fontSize: 14,
@@ -348,11 +409,12 @@ export function ReportBody({
               </p>
               <div>
                 <Button
-                  variant="primary"
+                  variant="secondary"
                   size="sm"
-                  onClick={() => onUseRewrite(opt.text)}
+                  onClick={() => onCopy(opt.text, i)}
+                  aria-live="polite"
                 >
-                  Use this rewrite
+                  {copiedIdx === i ? "Copied" : "Copy"}
                 </Button>
               </div>
             </div>

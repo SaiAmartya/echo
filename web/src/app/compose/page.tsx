@@ -44,7 +44,7 @@ function loadWebGrounding(): boolean {
 
 const MODE_OPTIONS: ReadonlyArray<{ value: Mode; label: string }> = [
   { value: "hypothetical", label: "Hypothetical situation" },
-  { value: "business", label: "Business post · Notion · 200 agents" },
+  { value: "business", label: "Business post - notion" },
 ];
 
 const MODE_HERO: Record<Mode, { title: string; sub: string }> = {
@@ -319,7 +319,140 @@ function ComposePageInner() {
             {error}
           </div>
         )}
+
+        {mode === "business" && <SocialConnectStrip />}
       </div>
     </Frame>
+  );
+}
+
+// Static placeholder strip rendered only in Business-post mode. Wires nothing
+// today — the buttons are visual scaffolding for a future seed-from-real-feed
+// pipeline. Per request, no real OAuth flows yet.
+function SocialConnectStrip() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        marginTop: 8,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--fg-3)",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Seed from your channels
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <SocialConnectButton brand="x" />
+        <SocialConnectButton brand="instagram" />
+      </div>
+    </div>
+  );
+}
+
+type SocialBrand = "x" | "instagram";
+
+function SocialConnectButton({ brand }: { brand: SocialBrand }) {
+  const cfg =
+    brand === "x"
+      ? {
+          label: "Connect to X",
+          background: "#0a0a0a",
+          color: "#f5f5f5",
+          border: "1px solid #2a2a2a",
+          hoverBackground: "#141414",
+          icon: <XLogo />,
+        }
+      : {
+          label: "Connect to Instagram",
+          // Instagram brand-gradient — kept faithful so the button reads as IG
+          // even at static sizes.
+          background:
+            "linear-gradient(135deg, #f58529 0%, #dd2a7b 50%, #8134af 80%, #515bd4 100%)",
+          color: "#ffffff",
+          border: "1px solid rgba(255,255,255,0.18)",
+          hoverBackground:
+            "linear-gradient(135deg, #f6913d 0%, #e0428a 50%, #8e44c0 80%, #6168db 100%)",
+          icon: <InstagramLogo />,
+        };
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => e.preventDefault()}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 16px",
+        background: cfg.background,
+        color: cfg.color,
+        border: cfg.border,
+        borderRadius: 10,
+        fontFamily: "var(--font-sans)",
+        fontSize: 13,
+        fontWeight: 500,
+        letterSpacing: "0.005em",
+        cursor: "pointer",
+        transition: "background 160ms var(--ease-out), transform 120ms var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = cfg.hoverBackground;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = cfg.background;
+      }}
+      onMouseDown={(e) => {
+        e.currentTarget.style.transform = "translateY(1px)";
+      }}
+      onMouseUp={(e) => {
+        e.currentTarget.style.transform = "translateY(0)";
+      }}
+      aria-label={cfg.label}
+      title={`${cfg.label} (coming soon)`}
+    >
+      {cfg.icon}
+      <span>{cfg.label}</span>
+    </button>
+  );
+}
+
+function XLogo() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 1200 1227"
+      fill="currentColor"
+      aria-hidden
+    >
+      <path d="M714 519 1160 0H1052L666 449 358 0H0l468 681L0 1227h108l409-475 326 475h358L714 519Zm-145 168-47-67L147 79h166l304 435 47 67 396 567H894L569 687Z" />
+    </svg>
+  );
+}
+
+function InstagramLogo() {
+  return (
+    <svg width={15} height={15} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect
+        x="2.5"
+        y="2.5"
+        width="19"
+        height="19"
+        rx="5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="17.5" cy="6.5" r="1.1" fill="currentColor" />
+    </svg>
   );
 }
