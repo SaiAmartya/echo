@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { AuthModal } from "@/components/AuthModal";
 import { useAuth } from "@/components/auth/AuthProvider";
 
-export default function SignInPage() {
+export default function SignUpPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
 
@@ -14,7 +14,7 @@ export default function SignInPage() {
 
   return (
     <div style={{ position: "relative", minHeight: "100vh", background: "var(--bg-deep)" }}>
-      <AuthModal mode="signin" redirectTo="/compose" />
+      <AuthModal mode="signup" redirectTo="/compose" />
     </div>
   );
 }

@@ -1386,9 +1386,9 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
     """
     # Local imports to avoid circular module load (db imports nothing from swarm).
     from datetime import datetime, timezone
-    from .db import get_audience, get_simulation_full
+    from .db import get_audience_unscoped, get_simulation_full_unscoped
 
-    full = get_simulation_full(sim_id)
+    full = get_simulation_full_unscoped(sim_id)
     if full is None:
         raise ReportSimNotFoundError(sim_id)
 
@@ -1398,11 +1398,11 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
 
     # Recover audience metadata via the simulations row (we only have draft +
     # posts from get_simulation_full). Cheap second SELECT.
-    from .db import get_simulation
-    sim_row = get_simulation(sim_id)
+    from .db import get_simulation_unscoped
+    sim_row = get_simulation_unscoped(sim_id)
     audience: dict[str, Any] | None = None
     if sim_row and sim_row.get("audience_id"):
-        audience = get_audience(sim_row["audience_id"])
+        audience = get_audience_unscoped(sim_row["audience_id"])
     audience_label = audience.get("name") if audience else "Unknown audience"
     audience_blurb = _audience_blurb(audience) if audience else "Unknown audience"
 

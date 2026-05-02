@@ -8,6 +8,7 @@ import { useRouter } from "next/navigation";
 import { Frame, PageHeader } from "@/components/Shell";
 import { Badge, Button } from "@/components/ui/Primitives";
 import { api, ApiError, type HistoryItem, type HistoryTone } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 // Static decorative filter strip — counts here are just for v2 polish, not
 // real aggregates. Per Phase E2 spec we keep this static.
@@ -43,6 +44,14 @@ function relativeTime(iso: string): string {
 }
 
 export default function HistoryPage() {
+  return (
+    <RequireAuth>
+      <HistoryPageInner />
+    </RequireAuth>
+  );
+}
+
+function HistoryPageInner() {
   const router = useRouter();
   const [items, setItems] = useState<HistoryItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);

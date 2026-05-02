@@ -9,6 +9,7 @@ import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
 import { Icon } from "@/components/ui/Primitives";
 import { api, ApiError, type Audience } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 const ROUND_OPTIONS = [3, 4, 5, 6] as const;
 const DEFAULT_ROUNDS = 5;
@@ -48,6 +49,14 @@ function loadDraft(): string {
 }
 
 export default function ComposePage() {
+  return (
+    <RequireAuth>
+      <ComposePageInner />
+    </RequireAuth>
+  );
+}
+
+function ComposePageInner() {
   const router = useRouter();
   const [draft, setDraft] = useState(SEED_DRAFT);
   const [rounds, setRounds] = useState<number>(DEFAULT_ROUNDS);

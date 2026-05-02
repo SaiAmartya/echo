@@ -13,20 +13,24 @@ DB_PATH = Path(os.environ.get("ECHO_DB_PATH", Path(__file__).resolve().parent.pa
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audiences (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     size INTEGER NOT NULL,
     archetypes TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_audiences_user ON audiences(user_id);
 
 CREATE TABLE IF NOT EXISTS simulations (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     audience_id TEXT NOT NULL,
     draft TEXT NOT NULL,
     rounds INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_simulations_user ON simulations(user_id);
 
 CREATE TABLE IF NOT EXISTS round_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,29 +73,138 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def insert_audience(audience_id: str, name: str, size: int, archetypes: list[dict[str, Any]]) -> None:
+def insert_audience(
+    audience_id: str,
+    user_id: str,
+    name: str,
+    size: int,
+    archetypes: list[dict[str, Any]],
+) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO audiences (id, name, size, archetypes) VALUES (?, ?, ?, ?)",
-            (audience_id, name, size, json.dumps(archetypes)),
+            "INSERT OR REPLACE INTO audiences (id, user_id, name, size, archetypes) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (audience_id, user_id, name, size, json.dumps(archetypes)),
         )
 
 
-def insert_simulation(sim_id: str, audience_id: str, draft: str, rounds: int) -> None:
+def insert_simulation(
+    sim_id: str, user_id: str, audience_id: str, draft: str, rounds: int
+) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO simulations (id, audience_id, draft, rounds) VALUES (?, ?, ?, ?)",
-            (sim_id, audience_id, draft, rounds),
+            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sim_id, user_id, audience_id, draft, rounds),
         )
 
 
-def get_simulation(sim_id: str) -> dict[str, Any] | None:
+def get_simulation(sim_id: str, user_id: str) -> dict[str, Any] | None:
+    """Return a simulation row only if it belongs to `user_id`. None otherwise."""
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM simulations WHERE id = ?", (sim_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM simulations WHERE id = ? AND user_id = ?",
+            (sim_id, user_id),
+        ).fetchone()
         return dict(row) if row else None
 
 
-def get_audience(audience_id: str) -> dict[str, Any] | None:
+def get_simulation_unscoped(sim_id: str) -> dict[str, Any] | None:
+    """Internal lookup without user scoping — used by the swarm engine for
+    auto-reports / streaming after the request handler has already verified
+    ownership via get_simulation(sim_id, uid). Never call from user-facing
+    handlers."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM simulations WHERE id = ?", (sim_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_simulation_full_unscoped(sim_id: str) -> dict[str, Any] | None:
+    """Internal: same as get_simulation_full but skips user scoping. Used by
+    the swarm engine's report generator. Never expose to handlers."""
+    with get_conn() as conn:
+        sim_row = conn.execute(
+            "SELECT id, draft, rounds, created_at FROM simulations WHERE id = ?",
+            (sim_id,),
+        ).fetchone()
+        if not sim_row:
+            return None
+
+        latest = conn.execute(
+            "SELECT round, payload FROM round_events WHERE simulation_id = ? "
+            "ORDER BY round DESC, id DESC LIMIT 1",
+            (sim_id,),
+        ).fetchone()
+        posts: list[dict[str, Any]] = []
+        latest_round: int | None = None
+        if latest:
+            latest_round = int(latest["round"])
+            try:
+                payload = json.loads(latest["payload"])
+                if isinstance(payload, dict):
+                    raw_posts = payload.get("posts", [])
+                    if isinstance(raw_posts, list):
+                        posts = raw_posts
+            except (TypeError, ValueError):
+                posts = []
+
+        analysis_row = conn.execute(
+            "SELECT payload FROM analyses WHERE simulation_id = ?",
+            (sim_id,),
+        ).fetchone()
+        analysis: dict[str, Any] | None = None
+        if analysis_row:
+            try:
+                analysis = json.loads(analysis_row["payload"])
+            except (TypeError, ValueError):
+                analysis = None
+
+    rounds = latest_round if latest_round is not None else int(sim_row["rounds"])
+
+    return {
+        "simulation_id": sim_row["id"],
+        "draft": sim_row["draft"],
+        "rounds": rounds,
+        "posts": posts,
+        "analysis": analysis,
+        "created_at": _iso_z(sim_row["created_at"]),
+    }
+
+
+def get_simulation_owner(sim_id: str) -> str | None:
+    """Internal: return the owning user_id for a sim, or None if it doesn't exist.
+    Used by the swarm engine when it generates auto-reports server-side without
+    a request scope. Should NOT be exposed to user-facing handlers."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM simulations WHERE id = ?",
+            (sim_id,),
+        ).fetchone()
+        return row["user_id"] if row else None
+
+
+def get_audience(audience_id: str, user_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name, size, archetypes FROM audiences WHERE id = ? AND user_id = ?",
+            (audience_id, user_id),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "size": row["size"],
+            "archetypes": json.loads(row["archetypes"]),
+        }
+
+
+def get_audience_unscoped(audience_id: str) -> dict[str, Any] | None:
+    """Internal lookup without user scoping — used by the swarm engine when
+    streaming a sim it has already authorized via get_simulation(sim_id, uid).
+    Never call from user-facing handlers."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, name, size, archetypes FROM audiences WHERE id = ?",
@@ -228,8 +341,9 @@ def _latest_round_payload(conn: sqlite3.Connection, sim_id: str) -> dict[str, An
         return None
 
 
-def list_simulations(limit: int) -> list[dict[str, Any]]:
-    """List simulations newest first with analysis-derived stats.
+def list_simulations(user_id: str, limit: int) -> list[dict[str, Any]]:
+    """List simulations newest first with analysis-derived stats, scoped to one
+    user.
 
     Per CONTRACTS v2 §8: each row carries a 240-char draft preview, post_count
     and mean_sentiment computed from the latest cumulative `round_events.payload`,
@@ -251,10 +365,11 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
                    a.payload     AS analysis_payload
             FROM simulations s
             LEFT JOIN analyses a ON a.simulation_id = s.id
+            WHERE s.user_id = ?
             ORDER BY s.rowid DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, limit),
         ).fetchall()
 
         for row in rows:
@@ -294,8 +409,9 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
     return items
 
 
-def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
-    """Return the full final state of a simulation for /simulate/replay.
+def get_simulation_full(sim_id: str, user_id: str) -> dict[str, Any] | None:
+    """Return the full final state of a simulation for /simulate/replay,
+    scoped to `user_id`.
 
     Shape (CONTRACTS v2 §9):
       { simulation_id, draft, rounds, posts[], analysis|None, created_at }
@@ -307,8 +423,9 @@ def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
     """
     with get_conn() as conn:
         sim_row = conn.execute(
-            "SELECT id, draft, rounds, created_at FROM simulations WHERE id = ?",
-            (sim_id,),
+            "SELECT id, draft, rounds, created_at FROM simulations "
+            "WHERE id = ? AND user_id = ?",
+            (sim_id, user_id),
         ).fetchone()
         if not sim_row:
             return None

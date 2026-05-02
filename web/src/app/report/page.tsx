@@ -16,6 +16,7 @@ import {
   type ReportTone,
   type ReportVerdict,
 } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 // Same hex values used by SwarmThread.tsx CLUSTER_CENTERS — kept local per
 // CONTRACTS guidance (do not import from SwarmThread).
@@ -565,8 +566,10 @@ function ReportBody({
 
 export default function ReportPage() {
   return (
-    <Suspense fallback={null}>
-      <ReportInner />
-    </Suspense>
+    <RequireAuth>
+      <Suspense fallback={null}>
+        <ReportInner />
+      </Suspense>
+    </RequireAuth>
   );
 }

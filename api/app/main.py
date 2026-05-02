@@ -18,14 +18,22 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from sse_starlette.sse import EventSourceResponse
+# Load api/.env before anything reads os.environ (firebase-admin creds,
+# GEMINI_API_KEY, etc.). Idempotent — safe if already loaded by swarm.py.
+from dotenv import load_dotenv
 
-from .db import (
+load_dotenv()
+
+from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+from sse_starlette.sse import EventSourceResponse  # noqa: E402
+
+from .auth import current_user_uid, current_user_uid_from_query  # noqa: E402
+from .db import (  # noqa: E402
     get_analysis,
     get_audience,
+    get_audience_unscoped,
     get_report,
     get_simulation,
     get_simulation_full,
@@ -37,7 +45,7 @@ from .db import (
     upsert_analysis,
     upsert_report,
 )
-from .swarm import (
+from .swarm import (  # noqa: E402
     GeminiUnavailableError,
     ReportSimNotFoundError,
     default_audience_archetypes,
@@ -228,7 +236,10 @@ def _bad(status: int, code: str, detail: str) -> HTTPException:
 
 
 @app.post("/seed", response_model=SeedResponse)
-def seed(req: SeedRequest) -> SeedResponse:
+def seed(
+    req: SeedRequest,
+    uid: str = Depends(current_user_uid),
+) -> SeedResponse:
     if req.mode == "csv" and not (req.payload and req.payload.strip()):
         raise _bad(400, "bad_payload", "CSV payload required for mode=csv")
     if req.mode == "oauth" and not (req.payload and req.payload.strip()):
@@ -246,7 +257,7 @@ def seed(req: SeedRequest) -> SeedResponse:
         size = 8420
 
     archetypes = default_audience_archetypes()
-    insert_audience(audience_id, name, size, archetypes)
+    insert_audience(audience_id, uid, name, size, archetypes)
     return SeedResponse(
         audience_id=audience_id,
         name=name,
@@ -256,23 +267,27 @@ def seed(req: SeedRequest) -> SeedResponse:
 
 
 @app.post("/simulate/start", response_model=SimulateStartResponse)
-def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
-    aud = get_audience(req.audience_id)
+def simulate_start(
+    req: SimulateStartRequest,
+    uid: str = Depends(current_user_uid),
+) -> SimulateStartResponse:
+    aud = get_audience(req.audience_id, uid)
     if not aud:
         raise _bad(404, "unknown_audience", "audience not found")
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, req.audience_id, req.draft, req.rounds)
+    insert_simulation(sim_id, uid, req.audience_id, req.draft, req.rounds)
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
 @app.get("/simulate/stream")
 async def simulate_stream(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid_from_query),
 ) -> EventSourceResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
-    audience = get_audience(sim["audience_id"])
+    audience = get_audience_unscoped(sim["audience_id"])
     if not audience:
         raise _bad(404, "unknown_audience", "audience not found")
 
@@ -334,8 +349,9 @@ async def simulate_stream(
 @app.get("/analyze", response_model=AnalyzeResponse)
 def analyze(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid),
 ) -> AnalyzeResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
 
@@ -356,9 +372,12 @@ def analyze(
 # Wire shape locked in CONTRACTS.md §8/§9. v1 endpoints above are untouched.
 
 @app.get("/history", response_model=HistoryResponse)
-def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
+def history(
+    limit: int = Query(default=50, ge=1, le=200),
+    uid: str = Depends(current_user_uid),
+) -> HistoryResponse:
     try:
-        items = list_simulations(limit)
+        items = list_simulations(uid, limit)
         return HistoryResponse(items=[HistoryItem(**it) for it in items])
     except HTTPException:
         raise
@@ -383,8 +402,9 @@ _REPORT_LOCK_TIMEOUT = 30.0
 async def report(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
     regenerate: bool = Query(default=False),
+    uid: str = Depends(current_user_uid),
 ) -> ReportResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
 
@@ -462,9 +482,10 @@ async def report(
 @app.get("/simulate/replay", response_model=ReplayResponse)
 def simulate_replay(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid),
 ) -> ReplayResponse:
     try:
-        full = get_simulation_full(simulation_id)
+        full = get_simulation_full(simulation_id, uid)
         if full is None:
             raise _bad(404, "unknown_simulation", "simulation not found")
 
