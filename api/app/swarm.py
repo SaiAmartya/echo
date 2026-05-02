@@ -2211,7 +2211,7 @@ def _enforce_gif_rarity_cap(
 
 
 def _enforce_gif_per_tag_cap(
-    posts: list[dict[str, Any]], *, max_per_tag: int = 2
+    posts: list[dict[str, Any]], *, max_per_tag: int = 1
 ) -> None:
     """G4: cap the per-round occurrences of any single gif_reaction tag.
 
@@ -2220,6 +2220,11 @@ def _enforce_gif_per_tag_cap(
     variety — without this, a popular tag like 'thinking' or 'deep_sigh' can
     dominate a round (the LLM has biases). User feedback 2026-05-02:
     "prevent the same gif to appear many many times."
+
+    Default tightened to 1 in G5 (2026-05-02): user reported same 1-2 gifs
+    dominating across the whole sim despite the per-round cap of 2. Tight
+    per-round cap of 1 guarantees zero same-GIF repetition within a round;
+    the per-SIM cap below distributes the cumulative budget.
 
     Runs AFTER `_enforce_gif_rarity_cap` so we operate on the already-capped
     set. Pure mutation; idempotent on already-capped lists. No-op when
@@ -2242,6 +2247,66 @@ def _enforce_gif_per_tag_cap(
             )
     for i in surplus_indices:
         agent = posts[i].get("agent")
+        if isinstance(agent, dict):
+            agent["gif_reaction"] = None
+
+
+def _enforce_gif_per_sim_cap(
+    new_posts: list[dict[str, Any]],
+    *,
+    cumulative: list[dict[str, Any]],
+    max_per_tag_per_sim: int = 3,
+) -> None:
+    """G5: cap CUMULATIVE per-sim occurrences of any single gif_reaction tag.
+
+    User feedback 2026-05-02: "agents frequently following the same 1-2
+    gifs (specific to each scenario)... is there a way to promote diversity
+    in gifs?"
+
+    The per-round cap (now tightened to 1) prevents within-round repetition,
+    but across 8 rounds the LLM still gravitates to 3-4 favorite tags
+    (thinking, deep_sigh, facepalm for negative scenarios). This cap counts
+    each tag's appearances in `cumulative` (all prior rounds) PLUS the new
+    round's `new_posts`, and nulls out any new occurrences that would push
+    the total past `max_per_tag_per_sim`. Forces the LLM's surplus picks to
+    redistribute across less-used tags as the sim progresses.
+
+    With ~40 expected GIFs per sim (50p × 8r × ~10%) and a cap of 3 per tag,
+    at minimum ⌈40/3⌉ = 14 distinct tags must appear before the budget
+    saturates — vs the ~6 distinct tags observed pre-G5.
+
+    Mutate-in-place on `new_posts` only. `cumulative` is read-only. Pure;
+    idempotent on already-capped state. No-op when ECHO_GIFS_ENABLED off.
+    """
+    if not new_posts or max_per_tag_per_sim < 1:
+        return
+    # Count tag occurrences across the whole sim so far (cumulative includes
+    # previously-emitted rounds; new_posts are this round's pre-cap candidates).
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    for p in cumulative:
+        tag = (p.get("agent") or {}).get("gif_reaction")
+        if tag:
+            counts[tag] += 1
+    # Bucket new_posts indices by tag, in arrival order.
+    by_tag: dict[str, list[int]] = {}
+    for i, p in enumerate(new_posts):
+        tag = (p.get("agent") or {}).get("gif_reaction")
+        if tag:
+            by_tag.setdefault(tag, []).append(i)
+    # For each tag, allow up to (cap - already_in_cumulative) new occurrences.
+    # Surplus gets nulled. Random subset so we don't always cull the same id.
+    surplus_indices: list[int] = []
+    for tag, indices in by_tag.items():
+        already = counts[tag]
+        budget_left = max(0, max_per_tag_per_sim - already)
+        if len(indices) > budget_left:
+            import random  # local import — same pattern as siblings
+            surplus_indices.extend(
+                random.sample(indices, len(indices) - budget_left)
+            )
+    for i in surplus_indices:
+        agent = new_posts[i].get("agent")
         if isinstance(agent, dict):
             agent["gif_reaction"] = None
 
@@ -2638,12 +2703,22 @@ async def run_simulation(
             # No-op when ECHO_GIFS_ENABLED is off (no posts have gifs).
             if ECHO_GIFS_ENABLED:
                 _enforce_gif_rarity_cap(new_posts, max_ratio=0.15)
-                # G4: per-tag dedup cap. Forces visual variety — without this
-                # the LLM's bias toward a few favorite tags (thinking,
-                # deep_sigh, etc.) lets the same GIF appear 6+ times per round.
-                # Cap each unique tag at max_per_tag occurrences; randomly null
-                # the rest. Runs AFTER rarity cap so we operate on the kept set.
-                _enforce_gif_per_tag_cap(new_posts, max_per_tag=2)
+                # G4: per-tag dedup cap (tightened in G5 from 2 → 1). Within
+                # any single round, no tag may appear more than once. Runs
+                # AFTER rarity cap so we operate on the kept set.
+                _enforce_gif_per_tag_cap(new_posts, max_per_tag=1)
+                # G5: per-SIM cumulative cap. Across the whole sim, each
+                # tag is allowed at most max_per_tag_per_sim occurrences
+                # total. Reads `cumulative` (prior rounds) + `new_posts`
+                # (this round's pre-emit candidates) and nulls any surplus
+                # in new_posts that would push the total past the cap.
+                # User-flagged 2026-05-02: "same 1-2 gifs scenario-specific."
+                # Forces the LLM's late-round picks to redistribute.
+                _enforce_gif_per_sim_cap(
+                    new_posts,
+                    cumulative=cumulative,
+                    max_per_tag_per_sim=3,
+                )
                 # Mirror the cap into persistence_actions so replay matches.
                 # Build an id-set of posts that ended up null after the cap;
                 # a persistence_action is keyed by persona_id, so we resolve
