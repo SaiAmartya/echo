@@ -2,13 +2,109 @@
 // 04 — Analysis (aggregated takeaway)
 // Ported from design/echo/project/lib/views.jsx (View04_Analysis)
 
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Frame, StepIndicator } from "@/components/Shell";
 import { Button, Eyebrow, Icon } from "@/components/ui/Primitives";
+import { api, ApiError, type Analysis } from "@/lib/api";
 
-export default function ResultsPage() {
+const POLL_INTERVAL_MS = 1000;
+const MAX_POLL_ATTEMPTS = 10;
+
+function ResultsInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const id = searchParams.get("id");
+
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id) {
+      setError("Missing simulation id.");
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    let attempts = 0;
+
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const result = await api.analyze(id);
+        if (cancelled) return;
+        setAnalysis(result);
+        setLoading(false);
+      } catch (e) {
+        if (cancelled) return;
+        if (e instanceof ApiError && e.status === 409 && e.code === "analysis_pending") {
+          if (attempts >= MAX_POLL_ATTEMPTS) {
+            setError("Analysis is still computing. Please retry shortly.");
+            setLoading(false);
+            return;
+          }
+          window.setTimeout(tick, POLL_INTERVAL_MS);
+          return;
+        }
+        const msg =
+          e instanceof ApiError
+            ? `${e.message} (${e.code})`
+            : e instanceof Error
+              ? e.message
+              : "Failed to load analysis.";
+        setError(msg);
+        setLoading(false);
+      }
+    };
+
+    void tick();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const onUseRewrite = () => {
+    if (!analysis) return;
+    sessionStorage.setItem("echo:draft", analysis.suggested_rewrite.rewrite);
+    router.push("/compose");
+  };
+
   return (
     <Frame topbarLabel="Analysis" sidebarActive="compose" topbarRight={<StepIndicator step={3} />}>
       <div style={{ maxWidth: 880, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+        {error && (
+          <div
+            role="alert"
+            style={{
+              background: "rgba(240,108,90,0.08)",
+              border: "1px solid rgba(240,108,90,0.35)",
+              color: "#f06c5a",
+              borderRadius: 10,
+              padding: "10px 14px",
+              fontSize: 13,
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        {loading && !error && (
+          <div
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: 18,
+              fontSize: 13,
+              color: "var(--fg-2)",
+            }}
+          >
+            Still computing the analysis…
+          </div>
+        )}
+
         {/* Headline takeaway */}
         <div
           style={{
@@ -33,12 +129,7 @@ export default function ResultsPage() {
               letterSpacing: "-0.01em",
             }}
           >
-            The idea lands.{" "}
-            <span style={{ fontStyle: "normal", fontFamily: "var(--font-sans)" }}>The phrasing</span> doesn't.
-          </p>
-          <p style={{ margin: 0, fontSize: 14, color: "var(--fg-2)", lineHeight: 1.55 }}>
-            Skeptics aren't pushing back on the substance — they're pushing back on "meetings are a tax on focus" reading
-            as absolutist. By round 4, consensus formed: change the phrasing, keep the substance.
+            {analysis?.tldr ?? "—"}
           </p>
         </div>
 
@@ -69,8 +160,7 @@ export default function ResultsPage() {
             >
               <Eyebrow>Original</Eyebrow>
               <div style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.5, marginTop: 8 }}>
-                Notion is replacing all-hands with a written weekly memo.{" "}
-                <s style={{ color: "var(--fg-3)" }}>Meetings are a tax on focus.</s> We'd rather ship.
+                {analysis?.suggested_rewrite.original ?? "—"}
               </div>
             </div>
             <div
@@ -83,13 +173,12 @@ export default function ResultsPage() {
             >
               <Eyebrow>Rewrite</Eyebrow>
               <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.5, marginTop: 8 }}>
-                Trying something at Notion: replacing the weekly all-hands with a written memo. We want to give the team
-                back focus time and let writing do the alignment work.
+                {analysis?.suggested_rewrite.rewrite ?? "—"}
               </div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Button variant="primary" size="sm">
+            <Button variant="primary" size="sm" onClick={onUseRewrite} disabled={!analysis}>
               Use rewrite
             </Button>
             <Button variant="ghost" size="sm">
@@ -111,25 +200,9 @@ export default function ResultsPage() {
           }}
         >
           <div style={{ fontSize: 13, fontWeight: 500, color: "var(--fg-1)", marginBottom: 6 }}>Worth reading</div>
-          {[
-            {
-              color: "#f06c5a",
-              label: "Skeptic dogpile",
-              tldr: '"Monthly is just shorter quarters" — challenges the cadence framing, not the writing.',
-            },
-            {
-              color: "#9bc97f",
-              label: "Practitioner save",
-              tldr: "Sales-context counter-example — they tried it, what stayed live, what became a memo.",
-            },
-            {
-              color: "#7dd49a",
-              label: "Consensus emerging",
-              tldr: '"Change the phrasing, keep the substance."',
-            },
-          ].map((c, i) => (
+          {(analysis?.worth_reading ?? []).map((c, i) => (
             <div
-              key={c.label}
+              key={`${c.label}-${i}`}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -145,18 +218,31 @@ export default function ResultsPage() {
               <Icon name="arrowUpRight" size={12} style={{ color: "var(--fg-3)" }} />
             </div>
           ))}
+          {!analysis && !loading && !error && (
+            <div style={{ fontSize: 12, color: "var(--fg-3)", padding: "10px 0" }}>No reply chains yet.</div>
+          )}
         </div>
 
         {/* Footer actions */}
         <div style={{ display: "flex", gap: 8, paddingTop: 4 }}>
-          <Button variant="ghost" icon={<Icon name="refresh" size={13} />}>
+          <Button variant="ghost" icon={<Icon name="refresh" size={13} />} onClick={() => router.push("/compose")}>
             Re-run
           </Button>
           <div style={{ flex: 1 }} />
-          <Button variant="secondary">Edit draft</Button>
+          <Button variant="secondary" onClick={() => router.push("/compose")}>
+            Edit draft
+          </Button>
           <Button variant="primary">Publish</Button>
         </div>
       </div>
     </Frame>
+  );
+}
+
+export default function ResultsPage() {
+  return (
+    <Suspense fallback={null}>
+      <ResultsInner />
+    </Suspense>
   );
 }

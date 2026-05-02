@@ -2,12 +2,37 @@
 // 01 — Seed (set up persona pool)
 // Ported from design/echo/project/lib/views.jsx (View01_Seed)
 
-import Link from "next/link";
-import type { ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { useState, type ReactNode } from "react";
 import { Frame, PageHeader, StepIndicator } from "@/components/Shell";
 import { Badge, Button, Eyebrow, Icon } from "@/components/ui/Primitives";
+import { api, ApiError } from "@/lib/api";
 
 export default function SeedPage() {
+  const router = useRouter();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const onUseAudience = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const audience = await api.seed({ mode: "sample", payload: null });
+      sessionStorage.setItem("echo:audience", JSON.stringify(audience));
+      router.push("/compose");
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `${e.message} (${e.code})`
+          : e instanceof Error
+            ? e.message
+            : "Failed to load audience.";
+      setError(msg);
+      setSubmitting(false);
+    }
+  };
+
   return (
     <Frame topbarLabel="Seed" sidebarActive="audience" topbarRight={<StepIndicator step={0} />}>
       <div style={{ maxWidth: 880, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 }}>
@@ -107,13 +132,32 @@ export default function SeedPage() {
           </div>
         </div>
 
+        {error && (
+          <div
+            role="alert"
+            style={{
+              background: "rgba(240,108,90,0.08)",
+              border: "1px solid rgba(240,108,90,0.35)",
+              color: "#f06c5a",
+              borderRadius: 10,
+              padding: "10px 14px",
+              fontSize: 13,
+            }}
+          >
+            {error}
+          </div>
+        )}
+
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
           <Button variant="ghost">Save as preset</Button>
-          <Link href="/compose" style={{ textDecoration: "none" }}>
-            <Button variant="primary" icon={<Icon name="arrowUpRight" size={12} />}>
-              Use this audience
-            </Button>
-          </Link>
+          <Button
+            variant="primary"
+            icon={<Icon name="arrowUpRight" size={12} />}
+            onClick={onUseAudience}
+            disabled={submitting}
+          >
+            {submitting ? "Loading…" : "Use this audience"}
+          </Button>
         </div>
       </div>
     </Frame>

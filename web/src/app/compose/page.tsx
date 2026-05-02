@@ -3,17 +3,81 @@
 // Ported from design/echo/project/lib/views.jsx (View02_Compose)
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Frame, PageHeader, StepIndicator } from "@/components/Shell";
 import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
+import { api, ApiError, type Audience } from "@/lib/api";
 
-const ROUND_OPTIONS = [3, 5, 8, 12, 20];
+const ROUND_OPTIONS = [3, 4, 5, 6] as const;
+const DEFAULT_ROUNDS = 5;
+
+function loadAudience(): Audience | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem("echo:audience");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Audience;
+  } catch {
+    return null;
+  }
+}
+
+function loadDraft(): string {
+  if (typeof window === "undefined") return SEED_DRAFT;
+  return window.sessionStorage.getItem("echo:draft") ?? SEED_DRAFT;
+}
 
 export default function ComposePage() {
   const router = useRouter();
   const [draft, setDraft] = useState(SEED_DRAFT);
-  const [rounds, setRounds] = useState(5);
+  const [rounds, setRounds] = useState<number>(DEFAULT_ROUNDS);
+  const [audience, setAudience] = useState<Audience | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAudience(loadAudience());
+    setDraft(loadDraft());
+  }, []);
+
+  // Keep the draft in sessionStorage as the user types so /results can return.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem("echo:draft", draft);
+  }, [draft]);
+
+  const audienceLabel = audience
+    ? `${audience.name} · ${audience.size.toLocaleString()} agents`
+    : "No audience yet — go back to seed";
+
+  const onRun = async () => {
+    if (submitting) return;
+    if (!audience) {
+      setError("No audience loaded — go back to the seed step.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const resp = await api.simulateStart({
+        draft,
+        audience_id: audience.audience_id,
+        rounds,
+      });
+      sessionStorage.setItem("echo:simulation", JSON.stringify(resp));
+      router.push(`/simulating?id=${encodeURIComponent(resp.simulation_id)}`);
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `${e.message} (${e.code})`
+          : e instanceof Error
+            ? e.message
+            : "Failed to start simulation.";
+      setError(msg);
+      setSubmitting(false);
+    }
+  };
 
   return (
     <Frame topbarLabel="Compose" sidebarActive="compose" topbarRight={<StepIndicator step={1} />}>
@@ -23,8 +87,9 @@ export default function ComposePage() {
         <Composer
           draft={draft}
           setDraft={setDraft}
-          audience={"Notion · 200 agents"}
-          onRun={() => router.push("/simulating")}
+          audience={audienceLabel}
+          onRun={onRun}
+          disabled={submitting || !audience}
         />
 
         {/* Rounds picker — compact slider-style */}
@@ -67,6 +132,22 @@ export default function ComposePage() {
           </div>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>~90s</span>
         </div>
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              background: "rgba(240,108,90,0.08)",
+              border: "1px solid rgba(240,108,90,0.35)",
+              color: "#f06c5a",
+              borderRadius: 10,
+              padding: "10px 14px",
+              fontSize: 13,
+            }}
+          >
+            {error}
+          </div>
+        )}
       </div>
     </Frame>
   );

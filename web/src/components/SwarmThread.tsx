@@ -2,6 +2,8 @@
 
 // SwarmThread — ported from design/echo/project/lib/SwarmThread.jsx
 
+import type { ServerPost } from "@/lib/api";
+
 type Archetype = "skeptic" | "enthusiast" | "curious" | "practitioner" | "pedant" | "lurker";
 type AudienceKind = "target" | "public";
 
@@ -21,6 +23,8 @@ type ThreadEvent = {
   sentiment: number;
   text: string;
 };
+
+export type { ServerPost };
 
 const SEED_AGENTS: Agent[] = [
   { id: "a1",  name: "audrey lin",  handle: "@audrey_lin",    archetype: "skeptic",      audience: "target" },
@@ -70,9 +74,6 @@ const CLUSTER_CENTERS: Record<Archetype, { x: number; y: number; color: string }
   skeptic:      { x: -100, y:  35, color: "#f06c5a" },
 };
 
-function getAgent(id: string) {
-  return SEED_AGENTS.find((a) => a.id === id);
-}
 function getInitials(name: string) {
   return name.split(" ").map((s) => s[0]).slice(0, 2).join("").toUpperCase();
 }
@@ -89,30 +90,74 @@ function agentPoint(agentId: string, archetype: Archetype) {
   return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r, color: center.color };
 }
 
+/**
+ * Normalize props into the internal (ThreadEvent[], Agent[]) representation.
+ * - Live mode: `posts` is a ServerPost[] from /simulate/stream.
+ * - Canned mode: undefined, fall back to THREAD_SCRIPT + SEED_AGENTS.
+ */
+function normalize(
+  posts: ServerPost[] | undefined,
+  currentRound: number,
+): { events: ThreadEvent[]; agents: Agent[] } {
+  if (posts === undefined) {
+    return {
+      events: THREAD_SCRIPT.filter((p) => p.round <= currentRound),
+      agents: SEED_AGENTS,
+    };
+  }
+  const filtered = posts.filter((p) => p.round <= currentRound);
+  const events: ThreadEvent[] = filtered.map((p) => ({
+    id: p.id,
+    round: p.round,
+    parent: p.parent,
+    agent: p.agent.id,
+    sentiment: p.sentiment,
+    text: p.text,
+  }));
+  const seen = new Set<string>();
+  const agents: Agent[] = [];
+  for (const p of filtered) {
+    if (seen.has(p.agent.id)) continue;
+    seen.add(p.agent.id);
+    agents.push({
+      id: p.agent.id,
+      name: p.agent.name,
+      handle: p.agent.handle,
+      archetype: p.agent.archetype,
+      audience: p.agent.audience,
+    });
+  }
+  return { events, agents };
+}
+
 export function SwarmThread({
   currentRound = 5,
   maxRounds = 5,
   seedDraft,
   running = false,
+  posts,
 }: {
   currentRound?: number;
   maxRounds?: number;
   seedDraft: string;
   running?: boolean;
+  posts?: ServerPost[];
 }) {
   void maxRounds;
-  const posts = THREAD_SCRIPT.filter((p) => p.round <= currentRound);
+  const { events, agents } = normalize(posts, currentRound);
+  const agentMap = new Map<string, Agent>(agents.map((a) => [a.id, a]));
+  const lookup = (id: string): Agent | undefined => agentMap.get(id);
 
   type Edge = { from: { x: number; y: number }; to: { x: number; y: number }; sentiment: number };
-  const edges: Edge[] = posts
+  const edges: Edge[] = events
     .map((p): Edge | null => {
-      const ag = getAgent(p.agent);
+      const ag = lookup(p.agent);
       if (!ag) return null;
       const me = agentPoint(ag.id, ag.archetype);
       if (p.parent === "seed") return { from: me, to: { x: 0, y: 0 }, sentiment: p.sentiment };
-      const parent = posts.find((x) => x.id === p.parent);
+      const parent = events.find((x) => x.id === p.parent);
       if (!parent) return null;
-      const pAg = getAgent(parent.agent);
+      const pAg = lookup(parent.agent);
       if (!pAg) return null;
       const them = agentPoint(pAg.id, pAg.archetype);
       return { from: me, to: them, sentiment: p.sentiment };
@@ -120,7 +165,7 @@ export function SwarmThread({
     .filter((e): e is Edge => e !== null);
 
   const childCounts: Record<string, number> = {};
-  posts.forEach((p) => {
+  events.forEach((p) => {
     childCounts[p.parent] = (childCounts[p.parent] || 0) + 1;
   });
   const dogpileIds = new Set(
@@ -131,13 +176,21 @@ export function SwarmThread({
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1.05fr 1fr", gap: 16, height: "100%" }}>
-      <ThreadColumn seedDraft={seedDraft} posts={posts} />
-      <SwarmMap posts={posts} edges={edges} dogpileIds={dogpileIds} running={running} />
+      <ThreadColumn seedDraft={seedDraft} posts={events} lookup={lookup} />
+      <SwarmMap posts={events} edges={edges} dogpileIds={dogpileIds} running={running} agents={agents} />
     </div>
   );
 }
 
-function ThreadColumn({ seedDraft, posts }: { seedDraft: string; posts: ThreadEvent[] }) {
+function ThreadColumn({
+  seedDraft,
+  posts,
+  lookup,
+}: {
+  seedDraft: string;
+  posts: ThreadEvent[];
+  lookup: (id: string) => Agent | undefined;
+}) {
   const memo: Record<string, number> = {};
   const depthOf = (p: ThreadEvent): number => {
     if (memo[p.id] != null) return memo[p.id];
@@ -187,7 +240,7 @@ function ThreadColumn({ seedDraft, posts }: { seedDraft: string; posts: ThreadEv
         </div>
 
         {enriched.map((p) => {
-          const ag = getAgent(p.agent);
+          const ag = lookup(p.agent);
           if (!ag) return null;
           const isLatest = p.round === lastRound;
           return (
@@ -258,19 +311,22 @@ function SwarmMap({
   edges,
   dogpileIds,
   running,
+  agents,
 }: {
   posts: ThreadEvent[];
   edges: Array<{ from: { x: number; y: number }; to: { x: number; y: number }; sentiment: number }>;
   dogpileIds: Set<string>;
   running: boolean;
+  agents: Agent[];
 }) {
   const VW = 360;
   const VH = 280;
   const activeAgents = new Set(posts.map((p) => p.agent));
+  const agentMap = new Map<string, Agent>(agents.map((a) => [a.id, a]));
   const dogpilePositions = posts
     .filter((p) => dogpileIds.has(p.id))
     .map((p) => {
-      const ag = getAgent(p.agent);
+      const ag = agentMap.get(p.agent);
       return ag ? agentPoint(ag.id, ag.archetype) : null;
     })
     .filter((v): v is { x: number; y: number; color: string } => Boolean(v));
@@ -330,7 +386,7 @@ function SwarmMap({
             />
           ))}
 
-          {SEED_AGENTS.map((a) => {
+          {agents.map((a) => {
             const p = agentPoint(a.id, a.archetype);
             const active = activeAgents.has(a.id);
             return (
