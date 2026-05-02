@@ -1619,7 +1619,10 @@ def _build_persona_user_prompt(
         "Aim to post or reply about half the time on average; lurkers a lot less.\n"
         "- If you reply, make sure your `replying_to` id is in the feed above.\n"
         "- Likes are cheap on social media; lurkers and enthusiasts in particular "
-        "like more than they post."
+        "like more than they post.\n"
+        "- HARD RULE: the `text` field is your reaction body ONLY. Do NOT include "
+        "JSON field names like `replying_to:`, `sentiment:`, `action:` inside the "
+        "text — those go in their own JSON fields, not in the body of your post."
     )
 
 
@@ -1631,6 +1634,44 @@ class PersonaAction:
     replying_to: str | None
     sentiment: float | None
     likes_given: list[str]
+
+
+# Z4 (lead 2026-05-02): defensive prefix strip. The model occasionally echoes
+# schema field names it saw in the OUTPUT FORMAT spec into the `text` body
+# (e.g. text="replying_to: p6\nactual reaction…"). We strip leading occurrences
+# of any of these keys followed by a value-like blob + optional newline.
+# Single-pass — won't recurse into mid-text occurrences (those are likely real).
+_SCHEMA_LEAK_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"replying_to|likes_given|sentiment|action|text"
+    r")\s*[:=]\s*"           # field-name + : or =
+    r"(?:"
+        r"\"[^\"]*\""        # quoted string value
+        r"|\[[^\]]*\]"       # array literal
+        r"|null"             # null
+        r"|-?\d+(?:\.\d+)?"  # number
+        r"|p\d+"             # post id like p6
+        r"|[A-Za-z_][\w]*"   # bare identifier
+    r")"
+    r"[,\s]*\n?",            # trailing comma/whitespace + optional newline
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_schema_leaks(text: str) -> str:
+    """Strip up to 3 leading schema-field-name prefixes from a text body.
+
+    Pure function. No-op when text is clean. Bounded iterations so we never
+    accidentally eat a real reaction that happens to start with the word
+    'action' or similar.
+    """
+    out = text
+    for _ in range(3):
+        new = _SCHEMA_LEAK_PREFIX_RE.sub("", out, count=1)
+        if new == out:
+            break
+        out = new
+    return out
 
 
 def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
@@ -1669,6 +1710,14 @@ def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
 
     text_raw = obj.get("text")
     text = text_raw.strip() if isinstance(text_raw, str) else None
+    if text is not None:
+        # Z4 (lead 2026-05-02): strip schema-field-name leaks. The v7 model
+        # occasionally prefixes the text with literal JSON keys it saw in the
+        # OUTPUT FORMAT spec (e.g. "replying_to: p6\nif we're talking invasion…").
+        # User-flagged on 2026-05-02 via screenshot. Defensive — works whether
+        # the prompt fix lands or not.
+        text = _strip_schema_leaks(text)
+        text = text.strip()
     if text is not None and len(text) > 400:
         text = text[:400]
     if action in ("post", "reply") and not text:
