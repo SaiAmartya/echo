@@ -16,6 +16,8 @@ Updated by each agent after every meaningful task. One line per agent.
 | backend-engineer-2 (opus) | ✅ done | 2026-05-02 02:42 | E1 done (commit ea39bbf); despawned |
 | frontend-engineer-2 (opus) | ✅ done | 2026-05-02 02:46 | E2 done (commit 4c7de52); despawned |
 | security-auditor (opus) | ✅ done | 2026-05-02 02:48 | E3 audit + fix (commits 968c460, 5038d91); despawned. Lead applied semaphore-scope fix (24e62bf) |
+| backend-engineer-3 (opus) | ✅ done | 2026-05-02 03:20 | F1+F2+F3 backend (commit 3ac2824) — gemini-3-flash-preview verified, 3500 char cap, /report endpoint cached + concurrency-guarded |
+| frontend-engineer-3 (opus) | ✅ done | 2026-05-02 03:15 | F1+F3 frontend (commit 3ffdd01) — Composer 3500 cap, See full report button, /report page editorial layout |
 
 ## Phase tracker
 
@@ -24,8 +26,11 @@ Updated by each agent after every meaningful task. One line per agent.
 - [x] **C** — Frontend wired to real backend
 - [x] **D** — Integration + E2E green (debugger fixed SSE collapse → browser-tester wire-verified PASS → human QA pending per R9)
 - [x] **E** — Basic-functionality completion: real /history + replay + security audit (E1 ea39bbf, E2 4c7de52, E3 968c460+5038d91+24e62bf). Awaiting human QA per R9.
-- [ ] **F1** — Hackathon-late: persona response diversity (per user direction, after Phase E QA passes)
-- [ ] **F2** — Demo polish + GIF + handoff (chrome extension reconnect required)
+- [x] **F1** — char cap raise 280 → 3500 (bundled into F1+F2+F3 commits)
+- [x] **F2** — analysis call → Gemini 3 Flash Preview (thinking enabled via config; full thread context)
+- [x] **F3** — POST /report endpoint + /report editorial page (commits 3ac2824, 3ffdd01). Awaiting human QA per R9.
+- [ ] **F4** — Swarm intelligence depth pass (per user direction: "make star feature more smart and comprehensive to truly replicate the public" — awaits proposal after F1-F3 QA passes)
+- [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
 ## Budget ledger
 
