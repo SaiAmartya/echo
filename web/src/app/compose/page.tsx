@@ -8,12 +8,23 @@ import { Frame, PageHeader, StepIndicator } from "@/components/Shell";
 import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
 import { Icon } from "@/components/ui/Primitives";
-import { api, ApiError, type Audience } from "@/lib/api";
+import { api, ApiError, type Audience, type SimulationMode } from "@/lib/api";
 
 const ROUND_OPTIONS = [3, 4, 5, 6] as const;
 const DEFAULT_ROUNDS = 5;
 
-type Mode = "hypothetical" | "business";
+type Mode = SimulationMode;
+const MODE_STORAGE_KEY = "echo:mode";
+
+function isMode(v: string | null): v is Mode {
+  return v === "hypothetical" || v === "business";
+}
+
+function loadMode(): Mode {
+  if (typeof window === "undefined") return "hypothetical";
+  const raw = window.sessionStorage.getItem(MODE_STORAGE_KEY);
+  return isMode(raw) ? raw : "hypothetical";
+}
 
 const MODE_OPTIONS: ReadonlyArray<{ value: Mode; label: string }> = [
   { value: "hypothetical", label: "Hypothetical situation" },
@@ -56,52 +67,57 @@ export default function ComposePage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Hydrate from sessionStorage on mount. P1's safety-net auto-seed is gone:
+  // hypothetical mode (the new default) doesn't need an audience at all, and
+  // business mode now seeds inside onRun if needed.
   useEffect(() => {
-    const cached = loadAudience();
-    setAudience(cached);
+    setAudience(loadAudience());
     setDraft(loadDraft());
-
-    // P1 safety net: Audience sidebar tab is gone, so if nothing's cached,
-    // silently seed the sample audience so simulate-start keeps working.
-    // P3 will rewire this to depend on selected mode.
-    if (!cached) {
-      let cancelled = false;
-      void (async () => {
-        try {
-          const aud = await api.seed({ mode: "sample", payload: null });
-          if (cancelled) return;
-          window.sessionStorage.setItem("echo:audience", JSON.stringify(aud));
-          setAudience(aud);
-        } catch {
-          // Swallow — onRun will surface a clearer error if the user submits.
-        }
-      })();
-      return () => {
-        cancelled = true;
-      };
-    }
+    setMode(loadMode());
   }, []);
 
-  // Keep the draft in sessionStorage as the user types so /results can return.
+  // Keep the draft in sessionStorage as the user types so /report can return.
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.sessionStorage.setItem("echo:draft", draft);
   }, [draft]);
 
+  // Persist selected mode so /simulating (and a refresh of /compose) can read it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(MODE_STORAGE_KEY, mode);
+  }, [mode]);
+
   const onRun = async () => {
     if (submitting) return;
-    if (!audience) {
-      setError("Audience still loading — give it a moment and try again.");
-      return;
-    }
     setSubmitting(true);
     setError(null);
     try {
-      const resp = await api.simulateStart({
-        draft,
-        audience_id: audience.audience_id,
-        rounds,
-      });
+      let resp;
+      if (mode === "hypothetical") {
+        // Hypothetical: backend routes against the built-in general public
+        // audience. Omit audience_id entirely — cleaner wire (per v4 §16).
+        resp = await api.simulateStart({
+          draft,
+          mode: "hypothetical",
+          rounds,
+        });
+      } else {
+        // Business: ensure we have an audience cached. If not, seed the sample
+        // audience inline (the Audience sidebar tab is gone in v4).
+        let aud = audience;
+        if (!aud) {
+          aud = await api.seed({ mode: "sample", payload: null });
+          window.sessionStorage.setItem("echo:audience", JSON.stringify(aud));
+          setAudience(aud);
+        }
+        resp = await api.simulateStart({
+          draft,
+          mode: "business",
+          audience_id: aud.audience_id,
+          rounds,
+        });
+      }
       sessionStorage.setItem("echo:simulation", JSON.stringify(resp));
       router.push(`/simulating?id=${encodeURIComponent(resp.simulation_id)}`);
     } catch (e) {

@@ -12,8 +12,21 @@ import {
   type RoundEvent,
   type ServerPost,
   type SimulateStartResponse,
+  type SimulationMode,
   type StreamErrorEvent,
 } from "@/lib/api";
+
+const MODE_STORAGE_KEY = "echo:mode";
+
+function isMode(v: string | null): v is SimulationMode {
+  return v === "hypothetical" || v === "business";
+}
+
+function loadMode(): SimulationMode {
+  if (typeof window === "undefined") return "business";
+  const raw = window.sessionStorage.getItem(MODE_STORAGE_KEY);
+  return isMode(raw) ? raw : "business";
+}
 
 const DEFAULT_ROUNDS = 5;
 // Minimum visible time per round so the user actually sees the swarm map
@@ -74,6 +87,10 @@ function SimulatingInner() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<ErrorState | null>(null);
   const [draft, setDraft] = useState(SEED_DRAFT);
+  // Default to "business" so the existing @notion attribution keeps appearing
+  // for legacy / unset cases. Live mode hydrates from sessionStorage; replay
+  // mode overwrites from the /simulate/replay payload.
+  const [mode, setMode] = useState<SimulationMode>("business");
   const sourceRef = useRef<EventSource | null>(null);
 
   // Paced ingest. Server can deliver round events back-to-back when the LLM is
@@ -95,6 +112,7 @@ function SimulatingInner() {
     const sim = loadSimulation();
     if (sim && typeof sim.rounds === "number") setMaxRounds(sim.rounds);
     setDraft(loadDraft());
+    setMode(loadMode());
   }, [isReplay]);
 
   useEffect(() => {
@@ -169,6 +187,7 @@ function SimulatingInner() {
           if (cancelled) return;
           setDraft(replay.draft);
           setMaxRounds(replay.rounds);
+          setMode(replay.mode);
           // Partition cumulative posts by round into RoundEvent-shaped slices.
           // posts[] is sorted (round asc, id asc) per contract; for each round
           // r we emit the full set of posts where round <= r so the SwarmThread
@@ -360,6 +379,7 @@ function SimulatingInner() {
             seedDraft={draft}
             running={running}
             posts={posts}
+            mode={mode}
           />
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>

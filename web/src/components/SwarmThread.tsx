@@ -2,7 +2,7 @@
 
 // SwarmThread — ported from design/echo/project/lib/SwarmThread.jsx
 
-import type { ServerPost } from "@/lib/api";
+import type { ServerPost, SimulationMode } from "@/lib/api";
 
 type Archetype = "skeptic" | "enthusiast" | "curious" | "practitioner" | "pedant" | "lurker";
 type AudienceKind = "target" | "public";
@@ -136,12 +136,14 @@ export function SwarmThread({
   seedDraft,
   running = false,
   posts,
+  mode = "business",
 }: {
   currentRound?: number;
   maxRounds?: number;
   seedDraft: string;
   running?: boolean;
   posts?: ServerPost[];
+  mode?: SimulationMode;
 }) {
   void maxRounds;
   const { events, agents } = normalize(posts, currentRound);
@@ -176,7 +178,7 @@ export function SwarmThread({
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1.05fr 1fr", gap: 16, height: "100%" }}>
-      <ThreadColumn seedDraft={seedDraft} posts={events} lookup={lookup} />
+      <ThreadColumn seedDraft={seedDraft} posts={events} lookup={lookup} mode={mode} />
       <SwarmMap posts={events} edges={edges} dogpileIds={dogpileIds} running={running} agents={agents} />
     </div>
   );
@@ -186,10 +188,12 @@ function ThreadColumn({
   seedDraft,
   posts,
   lookup,
+  mode = "business",
 }: {
   seedDraft: string;
   posts: ThreadEvent[];
   lookup: (id: string) => Agent | undefined;
+  mode?: SimulationMode;
 }) {
   const memo: Record<string, number> = {};
   const depthOf = (p: ThreadEvent): number => {
@@ -233,8 +237,14 @@ function ThreadColumn({
           }}
         >
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
-            <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>your post</span>
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>@notion</span>
+            {mode === "hypothetical" ? (
+              <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>the scenario</span>
+            ) : (
+              <>
+                <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-1)" }}>your post</span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-3)" }}>@notion</span>
+              </>
+            )}
           </div>
           <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.45 }}>{seedDraft}</div>
         </div>

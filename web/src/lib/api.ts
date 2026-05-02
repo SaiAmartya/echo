@@ -32,9 +32,14 @@ export interface SeedRequest {
   payload: string | null;
 }
 
+// v4 §16 — simulation mode discriminator on /simulate/start.
+// "hypothetical" omits audience_id; "business" requires it.
+export type SimulationMode = "business" | "hypothetical";
+
 export interface SimulateStartRequest {
   draft: string;
-  audience_id: string;
+  mode: SimulationMode;
+  audience_id?: string;
   rounds: number;
 }
 
@@ -106,6 +111,7 @@ export interface HistoryItem {
   mean_sentiment: number;
   created_at: string;
   has_analysis: boolean;
+  mode: SimulationMode;
 }
 
 export interface HistoryResponse {
@@ -120,6 +126,7 @@ export interface ReplayResponse {
   posts: ServerPost[];
   analysis: Analysis | null;
   created_at: string;
+  mode: SimulationMode;
 }
 
 // v3 §12 — POST /report
@@ -165,6 +172,7 @@ export interface ReportResponse {
   generated_at: string;
   model: string;
   report: Report;
+  mode: SimulationMode;
 }
 
 export interface GenerateReportRequest {

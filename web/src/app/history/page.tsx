@@ -195,6 +195,9 @@ export default function HistoryPage() {
                     <Badge tone={badge.tone} dot>
                       {badge.label}
                     </Badge>
+                    <Badge tone="neutral">
+                      {h.mode === "hypothetical" ? "Hypothetical" : "Business"}
+                    </Badge>
                     <span style={{ color: h.mean_sentiment >= 0 ? "#7dd49a" : "#f06c5a" }}>
                       {h.mean_sentiment >= 0 ? "+" : ""}
                       {h.mean_sentiment.toFixed(2)}

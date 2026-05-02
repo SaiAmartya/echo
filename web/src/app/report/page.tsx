@@ -201,15 +201,22 @@ function ReportInner() {
         )}
 
         {report && !loading && (
-          <ReportBody
-            report={report.report}
-            onUseRewrite={(text) => {
-              if (typeof window !== "undefined") {
-                window.sessionStorage.setItem("echo:draft", text);
-              }
-              router.push("/compose");
-            }}
-          />
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Badge tone="neutral">
+                {report.mode === "hypothetical" ? "Hypothetical" : "Business"}
+              </Badge>
+            </div>
+            <ReportBody
+              report={report.report}
+              onUseRewrite={(text) => {
+                if (typeof window !== "undefined") {
+                  window.sessionStorage.setItem("echo:draft", text);
+                }
+                router.push("/compose");
+              }}
+            />
+          </>
         )}
 
         {/* Footer actions */}
