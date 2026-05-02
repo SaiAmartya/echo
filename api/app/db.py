@@ -53,6 +53,26 @@ CREATE TABLE IF NOT EXISTS reports (
     model TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Z1 / v7 (CONTRACTS §§25-30): rich persona pool for the agentic swarm
+-- engine. Populated by api/app/persona_genesis.py on v7 sim start. v6 sims
+-- never write to this table; their replay path falls through to the v6
+-- archetype-batched re-derivation. hot_buttons is a JSON-encoded array
+-- (SQLite has no first-class array type).
+CREATE TABLE IF NOT EXISTS personas (
+    simulation_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    archetype TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    bio TEXT NOT NULL,
+    profession TEXT,
+    hot_buttons TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (simulation_id, persona_id)
+);
+CREATE INDEX IF NOT EXISTS idx_personas_sim ON personas(simulation_id);
 """
 
 
@@ -70,6 +90,18 @@ def init_db() -> None:
                 "ALTER TABLE simulations ADD COLUMN mode TEXT NOT NULL DEFAULT 'business'"
             )
             print("schema migration: mode column added to simulations")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass  # already migrated
+            else:
+                raise
+        # Z1 / v7 (CONTRACTS §27): per-sim persona_count, NULL for v6 sims and
+        # explicitly-null v7 callers. Same idempotent-migration pattern as `mode`.
+        try:
+            conn.execute(
+                "ALTER TABLE simulations ADD COLUMN persona_count INTEGER"
+            )
+            print("schema migration: persona_count column added to simulations")
         except sqlite3.OperationalError as e:
             if "duplicate column name" in str(e).lower():
                 pass  # already migrated
@@ -110,6 +142,7 @@ def insert_simulation(
     draft: str,
     rounds: int,
     mode: str = "business",
+    persona_count: int | None = None,
 ) -> None:
     """Persist a new simulation row scoped to `user_id`.
 
@@ -122,9 +155,9 @@ def insert_simulation(
     """
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds, mode) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (sim_id, user_id, audience_id, draft, rounds, mode),
+            "INSERT INTO simulations (id, user_id, audience_id, draft, rounds, mode, persona_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sim_id, user_id, audience_id, draft, rounds, mode, persona_count),
         )
 
 
@@ -287,6 +320,83 @@ def get_analysis(sim_id: str) -> dict[str, Any] | None:
     with get_conn() as conn:
         row = conn.execute("SELECT payload FROM analyses WHERE simulation_id = ?", (sim_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
+
+
+# --------------------------------------------------------------- Z1 personas
+def insert_personas(sim_id: str, personas: list[dict[str, Any]]) -> None:
+    """Persist a v7 persona pool produced by api/app/persona_genesis.
+
+    Idempotent at the (simulation_id, persona_id) primary key — re-running
+    Z1 for the same sim_id replaces the prior pool. Designed for one-shot
+    insertion at sim start; not optimized for incremental writes.
+
+    Each persona dict must carry: persona_id, name, handle, archetype,
+    audience, bio, profession (str | None), hot_buttons (list[str]).
+    """
+    if not personas:
+        return
+    rows: list[tuple[Any, ...]] = []
+    for p in personas:
+        hot_buttons = p.get("hot_buttons") or []
+        if not isinstance(hot_buttons, list):
+            hot_buttons = []
+        rows.append(
+            (
+                sim_id,
+                p["persona_id"],
+                p["name"],
+                p["handle"],
+                p["archetype"],
+                p["audience"],
+                p.get("bio") or "",
+                p.get("profession"),
+                json.dumps(hot_buttons),
+            )
+        )
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO personas "
+            "(simulation_id, persona_id, name, handle, archetype, audience, "
+            "bio, profession, hot_buttons) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
+def get_personas(sim_id: str) -> list[dict[str, Any]]:
+    """Return the persisted persona pool for a sim, or [] if none.
+
+    Z2 will read this on the v7 round path; Z1 only writes (verifier reads
+    via raw sqlite). hot_buttons is decoded back to a list[str].
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT persona_id, name, handle, archetype, audience, bio, "
+            "profession, hot_buttons FROM personas "
+            "WHERE simulation_id = ? ORDER BY persona_id",
+            (sim_id,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            hot_buttons = json.loads(row["hot_buttons"]) if row["hot_buttons"] else []
+        except (TypeError, ValueError):
+            hot_buttons = []
+        if not isinstance(hot_buttons, list):
+            hot_buttons = []
+        out.append(
+            {
+                "persona_id": row["persona_id"],
+                "name": row["name"],
+                "handle": row["handle"],
+                "archetype": row["archetype"],
+                "audience": row["audience"],
+                "bio": row["bio"] or "",
+                "profession": row["profession"],
+                "hot_buttons": hot_buttons,
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------- v3 reports

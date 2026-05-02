@@ -124,6 +124,12 @@ class SimulateStartRequest(BaseModel):
     # raised in lock-step (swarm.MAX_LLM_CALLS 40 → 100) to fit
     # 6 archetypes × 15 rounds + 1 analysis + 1 report = 92 calls.
     rounds: int = Field(default=5, ge=5, le=15)
+    # Z1 / v7 (CONTRACTS §27): persona pool size for the agentic engine.
+    # Optional and additive — only takes effect when ECHO_ENGINE_VERSION="v7"
+    # (server-side check in swarm.run_simulation). v6 callers may include this
+    # field freely; the server ignores it. Range [30, 100] enforced here so
+    # out-of-range bodies fail with HTTP 422 before any state is persisted.
+    persona_count: int | None = Field(default=None, ge=30, le=100)
 
 
 class SimulateStartResponse(BaseModel):
@@ -319,7 +325,18 @@ def simulate_start(
         stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
 
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, uid, stored_audience_id, req.draft, req.rounds, mode=req.mode)
+    # Z1 / v7: persist persona_count on the sim row so /simulate/stream can
+    # plumb it through to run_simulation without an extra request body. v6
+    # sims store NULL here (column added by db.init_db migration).
+    insert_simulation(
+        sim_id,
+        uid,
+        stored_audience_id,
+        req.draft,
+        req.rounds,
+        mode=req.mode,
+        persona_count=req.persona_count,
+    )
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
@@ -346,6 +363,16 @@ async def simulate_stream(
 
     draft = sim["draft"]
     rounds = int(sim["rounds"])
+    # Z1 / v7: surface the persisted persona_count (NULL for v6 sims). The
+    # column was added by an idempotent ALTER TABLE migration, so older sim
+    # rows transparently read back as None here.
+    persona_count_raw = sim.get("persona_count") if isinstance(sim, dict) else None
+    persona_count: int | None = (
+        int(persona_count_raw)
+        if isinstance(persona_count_raw, int)
+        or (isinstance(persona_count_raw, str) and persona_count_raw.isdigit())
+        else None
+    )
 
     async def event_gen():
         try:
@@ -355,6 +382,7 @@ async def simulate_stream(
                 audience=audience,
                 rounds=rounds,
                 mode=sim_mode,
+                persona_count=persona_count,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})
