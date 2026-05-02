@@ -63,7 +63,14 @@ GEMINI_GROUNDING_MODEL = os.environ.get("GEMINI_GROUNDING_MODEL", "gemini-3-flas
 # with headroom; v6 sims still spend ~92, so the raised cap is a no-op for them.
 # api/.env overrides (gitignored) may pin lower for local dev — see L19. The
 # Z2 dev test recipe is documented in TaskList #28.
-MAX_LLM_CALLS = int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "1200"))
+# Z6: ECHO_DEV_MODE=1 shrinks per-sim resource limits 3× for cheap iteration
+# during development. Concurrency is intentionally NOT divided — wider fan-out
+# doesn't change cost, only wall-clock. With dev-mode on, a default v7 sim
+# burns ~139 calls (vs prod ~403) and finishes in ~30s (vs ~85s).
+ECHO_DEV_MODE = os.environ.get("ECHO_DEV_MODE", "0") == "1"
+_DEV_DIVIDER = 3 if ECHO_DEV_MODE else 1
+
+MAX_LLM_CALLS = max(50, int(os.environ.get("MAX_LLM_CALLS_PER_SIMULATION", "1200")) // _DEV_DIVIDER)
 # Z2: bumped 6 → 12 to absorb the per-persona fan-out. 50 personas at 12-wide
 # ≈ 4-5 batches per round; per-call latency ~1-3s on Flash-Lite. v6 round loop
 # still gathers 6 archetypes per round so 12 is also a no-op there. Process-
@@ -77,6 +84,14 @@ MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "256"))
 # v6 path ignores this constant entirely.
 _LIKE_DISPLAY_MULTIPLIER = int(os.environ.get("ECHO_LIKE_DISPLAY_MULTIPLIER", "1"))
 
+# Z6: power-law (Zipfian) transform constants for v7 like counts. Top 10% of
+# posts in a round get viral amplification; middle 40% near-unchanged; bottom
+# 50% damped to near-zero. v6 path is unaffected — `attach_engagement` already
+# produces a natural spread via the affinity matrix.
+_LIKE_VIRAL_AMPLIFIER = float(os.environ.get("ECHO_LIKE_VIRAL_AMPLIFIER", "5.0"))
+_LIKE_TAIL_DAMPING = float(os.environ.get("ECHO_LIKE_TAIL_DAMPING", "0.3"))
+_LIKE_ZIPF_EXPONENT = float(os.environ.get("ECHO_LIKE_ZIPF_EXPONENT", "0.7"))
+
 # Z1 / v7 (CONTRACTS §29): engine version flag. "v6" = current archetype-batched
 # engine (default). "v7" = agentic per-persona engine (Z2). Z1 only adds the
 # upfront persona-genesis call when v7 is set; the round loop is unchanged
@@ -84,7 +99,8 @@ _LIKE_DISPLAY_MULTIPLIER = int(os.environ.get("ECHO_LIKE_DISPLAY_MULTIPLIER", "1
 ECHO_ENGINE_VERSION = os.environ.get("ECHO_ENGINE_VERSION", "v6").strip().lower()
 # Z1 default persona pool size (range [30, 100] enforced at the request boundary).
 # Used when v7 + persona_count omitted. Plan #2.
-ECHO_DEFAULT_PERSONA_COUNT = int(os.environ.get("ECHO_DEFAULT_PERSONA_COUNT", "50"))
+# Z6: scaled by _DEV_DIVIDER — prod 50, dev ~17 — to cut per-sim cost.
+DEFAULT_PERSONA_COUNT = int(os.environ.get("ECHO_DEFAULT_PERSONA_COUNT", "50")) // _DEV_DIVIDER
 
 PER_CALL_TIMEOUT = 10.0
 # Thinking-model calls: longer ceiling (5-20s typical, occasional 30s+ on
@@ -95,7 +111,9 @@ THINKING_CALL_TIMEOUT = 60.0
 # sims still finish in ~30s end-to-end so this is no-op for v6. Genesis adds
 # ≈10s, per-round wave (50p / 12-concurrency × ~2s) ≈ 8-12s, so 8 rounds ≈
 # 70-100s + analysis (5-15s, thinking_level=low) lands well inside 240s.
-WALLCLOCK_TIMEOUT = float(os.environ.get("ECHO_WALLCLOCK_TIMEOUT", "240"))
+# Z6: divided by _DEV_DIVIDER (3× tighter when dev-mode on) — dev sims are
+# smaller and should finish well inside ~80s.
+WALLCLOCK_TIMEOUT = float(os.environ.get("ECHO_WALLCLOCK_TIMEOUT", "240")) / _DEV_DIVIDER
 
 ARCHETYPES: tuple[str, ...] = (
     "skeptic",
@@ -1850,6 +1868,42 @@ def _apply_v7_engagement(
         p["reply_count"] = counts.get(p["id"], 0)
 
 
+def _apply_power_law_likes(posts: list[dict[str, Any]]) -> None:
+    """Z6: in-place Zipf transform on v7 like_count.
+
+    Top 10% of posts get viral amplification (× _LIKE_VIRAL_AMPLIFIER × rank^-α);
+    middle 40% near-unchanged; bottom 50% damped to near-zero. Pure function of
+    raw inputs — sort + formula are deterministic, so two replays of the same
+    v7 sim produce identical bytes (L22).
+
+    Only called from the v7 path. v6's `attach_engagement` is a different
+    algorithm (affinity matrix × visibility decay × controversy bonus) that
+    already produces a natural spread and must NOT be touched.
+    """
+    if not posts:
+        return
+    # Sort by descending like_count, breaking ties by post-id ordinal so the
+    # rank assignment is fully deterministic across replays.
+    ranked = sorted(
+        enumerate(posts),
+        key=lambda ip: (
+            -ip[1].get("like_count", 0),
+            int(ip[1]["id"][1:]) if ip[1]["id"].startswith("p") else 0,
+        ),
+    )
+    n = len(ranked)
+    for rank0, (idx, _post) in enumerate(ranked):
+        rank = rank0 + 1
+        raw = posts[idx].get("like_count", 0)
+        if rank <= max(1, n // 10):
+            mult = _LIKE_VIRAL_AMPLIFIER * (rank ** (-_LIKE_ZIPF_EXPONENT))
+        elif rank <= n // 2:
+            mult = 1.0 * (rank ** (-_LIKE_ZIPF_EXPONENT * 0.5))
+        else:
+            mult = _LIKE_TAIL_DAMPING * (rank ** (-_LIKE_ZIPF_EXPONENT * 0.4))
+        posts[idx]["like_count"] = max(0, round(raw * mult))
+
+
 # --------------------------------------------------------------- public API
 async def run_simulation(
     *,
@@ -1926,7 +1980,7 @@ async def run_simulation(
     # 1 call against the per-sim budget. v6 path is untouched.
     # Z2: when ECHO_ENGINE_VERSION="v7" we ALSO use the genesis output to
     # drive the round loop. If persona_count was omitted on the request, we
-    # default to ECHO_DEFAULT_PERSONA_COUNT (50) per CONTRACTS §27.
+    # default to DEFAULT_PERSONA_COUNT (prod 50, dev ~17 with Z6 ECHO_DEV_MODE).
     if ECHO_ENGINE_VERSION == "v7":
         # Defer-import keeps swarm.py importable when persona_genesis is
         # absent (e.g. unit tests stubbing the module).
@@ -1934,7 +1988,7 @@ async def run_simulation(
         from . import db as _db  # noqa: WPS433 — local-only persistence hook
 
         effective_persona_count = (
-            int(persona_count) if persona_count is not None else ECHO_DEFAULT_PERSONA_COUNT
+            int(persona_count) if persona_count is not None else DEFAULT_PERSONA_COUNT
         )
         # Clamp defensively — main.py validates [30, 100] but env-driven
         # default could escape that.
@@ -2090,6 +2144,11 @@ async def run_simulation(
         }
         # Per-persona action history for the memory block.
         history: dict[str, list[dict[str, Any]]] = {pid: [] for pid in personas_by_id}
+        # Z6: raw cumulative like counts, kept in a sidecar so the power-law
+        # transform reads RAW each round (not the prior round's transformed
+        # `like_count`, which would compound viral amplification round over
+        # round). Replay-stable: re-derived from the same like_deltas history.
+        raw_like_counts: dict[str, int] = {}
 
         for round_n in range(1, rounds + 1):
             # Build curated feed + memory per persona for this round.
@@ -2155,7 +2214,23 @@ async def run_simulation(
                 known_post_ids=known_post_ids,
             )
             cumulative.extend(new_posts)
-            _apply_v7_engagement(cumulative, like_deltas=like_deltas)
+            # Z6: accumulate RAW like counts in the sidecar so the power-law
+            # transform sees raw input each round (not the previously-amplified
+            # value — that would compound exponentially across rounds).
+            for _pid, _delta in like_deltas.items():
+                raw_like_counts[_pid] = raw_like_counts.get(_pid, 0) + int(_delta)
+            for _p in cumulative:
+                _p["like_count"] = raw_like_counts.get(_p["id"], 0)
+            # _apply_v7_engagement now just recomputes reply_count (we've
+            # already restamped like_count from raw); pass empty deltas so it
+            # doesn't double-add. v6 path is unaffected — it never hits this
+            # branch.
+            _apply_v7_engagement(cumulative, like_deltas={})
+            # Z6: power-law transform on cumulative like counts. Pure function
+            # of raw counts (sort + formula); replay-stable. v6 path bypasses
+            # this entirely — its deterministic affinity-matrix engagement
+            # already produces a natural spread.
+            _apply_power_law_likes(cumulative)
 
             # Update history for the memory block in subsequent rounds.
             for pa in persona_actions:
