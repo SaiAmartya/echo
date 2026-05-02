@@ -38,6 +38,7 @@ from .db import (
     upsert_report,
 )
 from .swarm import (
+    GENERAL_PUBLIC_AUDIENCE,
     GeminiUnavailableError,
     ReportSimNotFoundError,
     default_audience_archetypes,
@@ -100,7 +101,14 @@ class SimulateStartRequest(BaseModel):
     # v3 (CONTRACTS §13): draft cap raised 1000 → 3500 chars to support
     # PR posts, product launches, LinkedIn long-form, Twitter/X premium.
     draft: str = Field(min_length=1, max_length=3500)
-    audience_id: str = Field(pattern=_AUDIENCE_ID_PATTERN)
+    # v4 (CONTRACTS §16): `mode` is additive with default "business" so
+    # legacy callers (no field) keep working unchanged. `audience_id` is now
+    # optional at the wire level; the handler enforces "required when
+    # mode=business" and surfaces a dedicated error code (§18). The pattern
+    # still applies when a value is provided — None bypasses it (verified via
+    # Context7 pydantic 2.x docs 2026-05-02).
+    mode: Literal["business", "hypothetical"] = "business"
+    audience_id: str | None = Field(default=None, pattern=_AUDIENCE_ID_PATTERN)
     rounds: int = Field(default=5, ge=3, le=6)
 
 
@@ -138,6 +146,8 @@ class HistoryItem(BaseModel):
     mean_sentiment: float
     created_at: str
     has_analysis: bool
+    # v4 (CONTRACTS §17): additive — defaults handled in db.list_simulations.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 class HistoryResponse(BaseModel):
@@ -174,6 +184,8 @@ class ReplayResponse(BaseModel):
     posts: list[ReplayPost]
     analysis: ReplayAnalysis | None
     created_at: str
+    # v4 (CONTRACTS §17): additive — defaults to "business" for legacy rows.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 # v3 (CONTRACTS §12): /report response models. Locked shapes.
@@ -215,6 +227,9 @@ class ReportResponse(BaseModel):
     generated_at: str
     model: str
     report: ReportBody
+    # v4 (CONTRACTS §17): additive — defaults to "business" for legacy
+    # cached report rows that pre-date the migration.
+    mode: Literal["business", "hypothetical"] = "business"
 
 
 # ---------------------------------------------------------------- endpoints
@@ -257,11 +272,28 @@ def seed(req: SeedRequest) -> SeedResponse:
 
 @app.post("/simulate/start", response_model=SimulateStartResponse)
 def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
-    aud = get_audience(req.audience_id)
-    if not aud:
-        raise _bad(404, "unknown_audience", "audience not found")
+    # v4 (CONTRACTS §§16-19):
+    #   - business    → audience_id REQUIRED, looked up via get_audience(); 404 if missing.
+    #   - hypothetical → audience_id IGNORED, persisted as the GENERAL_PUBLIC_AUDIENCE
+    #                    sentinel id so the schema's NOT NULL constraint stays satisfied
+    #                    without a destructive table rebuild. Routing on `mode` (not on
+    #                    audience_id presence) keeps the read path unambiguous.
+    if req.mode == "business":
+        if not req.audience_id:
+            raise _bad(
+                400,
+                "audience_id_required_for_business_mode",
+                "audience_id is required when mode=business",
+            )
+        aud = get_audience(req.audience_id)
+        if not aud:
+            raise _bad(404, "unknown_audience", "audience not found")
+        stored_audience_id = req.audience_id
+    else:  # hypothetical
+        stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
+
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, req.audience_id, req.draft, req.rounds)
+    insert_simulation(sim_id, stored_audience_id, req.draft, req.rounds, mode=req.mode)
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
@@ -272,9 +304,17 @@ async def simulate_stream(
     sim = get_simulation(simulation_id)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
-    audience = get_audience(sim["audience_id"])
-    if not audience:
-        raise _bad(404, "unknown_audience", "audience not found")
+
+    # v4 (CONTRACTS §§16-19): hypothetical-mode sims weren't bound to a user
+    # audience profile — short-circuit to GENERAL_PUBLIC_AUDIENCE so /simulate/stream
+    # works without a real row in the audiences table.
+    sim_mode = sim.get("mode") if sim.get("mode") in ("business", "hypothetical") else "business"
+    if sim_mode == "hypothetical":
+        audience = GENERAL_PUBLIC_AUDIENCE
+    else:
+        audience = get_audience(sim["audience_id"])
+        if not audience:
+            raise _bad(404, "unknown_audience", "audience not found")
 
     draft = sim["draft"]
     rounds = int(sim["rounds"])
@@ -286,6 +326,7 @@ async def simulate_stream(
                 draft=draft,
                 audience=audience,
                 rounds=rounds,
+                mode=sim_mode,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})
@@ -482,6 +523,8 @@ def simulate_replay(
                 log.warning("replay: skipping malformed analysis for %s: %r", simulation_id, exc)
                 analysis_obj = None
 
+        mode_raw = full.get("mode")
+        mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
         return ReplayResponse(
             simulation_id=full["simulation_id"],
             draft=full["draft"],
@@ -489,6 +532,7 @@ def simulate_replay(
             posts=[ReplayPost(**p) for p in full["posts"]],
             analysis=analysis_obj,
             created_at=full["created_at"],
+            mode=mode,
         )
     except HTTPException:
         raise

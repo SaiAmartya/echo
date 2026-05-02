@@ -56,6 +56,21 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript(SCHEMA)
+        # v4 (CONTRACTS §§16-19): idempotent migration to add `mode` column to
+        # simulations. New rows default to 'business' so legacy rows + legacy
+        # callers without a mode field keep working unchanged. SQLite's
+        # `ALTER TABLE ADD COLUMN` raises OperationalError("duplicate column
+        # name: mode") on re-run; we swallow only that exact case.
+        try:
+            conn.execute(
+                "ALTER TABLE simulations ADD COLUMN mode TEXT NOT NULL DEFAULT 'business'"
+            )
+            print("schema migration: mode column added to simulations")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass  # already migrated
+            else:
+                raise
 
 
 @contextmanager
@@ -77,11 +92,27 @@ def insert_audience(audience_id: str, name: str, size: int, archetypes: list[dic
         )
 
 
-def insert_simulation(sim_id: str, audience_id: str, draft: str, rounds: int) -> None:
+def insert_simulation(
+    sim_id: str,
+    audience_id: str,
+    draft: str,
+    rounds: int,
+    mode: str = "business",
+) -> None:
+    """Persist a new simulation row.
+
+    v4 (CONTRACTS §§16-19): `mode` is "business" (default, requires a real
+    audience_id) or "hypothetical" (uses the GENERAL_PUBLIC_AUDIENCE sentinel).
+    The `audience_id` column is stored verbatim; for hypothetical sims the
+    caller passes the sentinel id so the schema's NOT NULL constraint stays
+    satisfied without a destructive table rebuild. Routing on `mode` (not on
+    audience_id presence) keeps the read path unambiguous.
+    """
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO simulations (id, audience_id, draft, rounds) VALUES (?, ?, ?, ?)",
-            (sim_id, audience_id, draft, rounds),
+            "INSERT INTO simulations (id, audience_id, draft, rounds, mode) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sim_id, audience_id, draft, rounds, mode),
         )
 
 
@@ -247,6 +278,7 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
             SELECT s.id          AS simulation_id,
                    s.draft       AS draft,
                    s.rounds      AS rounds,
+                   s.mode        AS mode,
                    s.created_at  AS created_at,
                    a.payload     AS analysis_payload
             FROM simulations s
@@ -279,6 +311,12 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
             draft_full = row["draft"] or ""
             draft_preview = draft_full[:240]
 
+            # v4: `mode` defaults to 'business' for legacy rows (the column has
+            # a DEFAULT in the migration, but be defensive against pre-migration
+            # databases or tampered rows).
+            mode_raw = row["mode"] if "mode" in row.keys() else None
+            mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
+
             items.append(
                 {
                     "simulation_id": sim_id,
@@ -289,6 +327,7 @@ def list_simulations(limit: int) -> list[dict[str, Any]]:
                     "mean_sentiment": mean_sentiment,
                     "created_at": _iso_z(row["created_at"]),
                     "has_analysis": has_analysis,
+                    "mode": mode,
                 }
             )
     return items
@@ -307,7 +346,7 @@ def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
     """
     with get_conn() as conn:
         sim_row = conn.execute(
-            "SELECT id, draft, rounds, created_at FROM simulations WHERE id = ?",
+            "SELECT id, draft, rounds, mode, created_at FROM simulations WHERE id = ?",
             (sim_id,),
         ).fetchone()
         if not sim_row:
@@ -344,6 +383,11 @@ def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
 
     rounds = latest_round if latest_round is not None else int(sim_row["rounds"])
 
+    # v4: surface mode in the projection. Defensive fallback for any row
+    # written before the migration ran.
+    mode_raw = sim_row["mode"] if "mode" in sim_row.keys() else None
+    mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
+
     return {
         "simulation_id": sim_row["id"],
         "draft": sim_row["draft"],
@@ -351,4 +395,5 @@ def get_simulation_full(sim_id: str) -> dict[str, Any] | None:
         "posts": posts,
         "analysis": analysis,
         "created_at": _iso_z(sim_row["created_at"]),
+        "mode": mode,
     }

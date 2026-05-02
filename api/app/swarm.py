@@ -139,7 +139,12 @@ def _build_user_prompt(
     round_n: int,
     total_rounds: int,
     prior_top: list[dict[str, Any]],
+    mode: str = "business",
 ) -> str:
+    # v4 (CONTRACTS §§16-19): `mode` is plumbed through so P4/P6 can specialize
+    # copy for hypothetical scenarios. P2 keeps the existing wording for both
+    # modes — engine, prompt, budget, SSE shape all unchanged.
+    _ = mode  # reserved for downstream phase polish
     if round_n == 1 or not prior_top:
         prior_block = "This is the first round. React directly to the draft."
     else:
@@ -609,6 +614,7 @@ async def _call_archetype(
     prior_top: list[dict[str, Any]],
     budget: BudgetCounter,
     client: Any,
+    mode: str = "business",
 ) -> list[Reaction]:
     system = _system_for(archetype)
     user = _build_user_prompt(
@@ -617,6 +623,7 @@ async def _call_archetype(
         round_n=round_n,
         total_rounds=total_rounds,
         prior_top=prior_top,
+        mode=mode,
     )
     raw = await _call_gemini(
         system=system,
@@ -692,6 +699,7 @@ async def run_simulation(
     rounds: int,
     seed: int | None = None,
     client: Any | None = None,
+    mode: str = "business",
 ) -> AsyncIterator[dict[str, Any]]:
     """Async generator yielding SSE event dicts for one full simulation.
 
@@ -730,6 +738,7 @@ async def run_simulation(
                         prior_top=prior_top,
                         budget=budget,
                         client=client,
+                        mode=mode,
                     )
                     for arc in ARCHETYPES
                 ],
@@ -1071,6 +1080,22 @@ def _parse_analysis(raw: str, draft: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------- defaults
+# v4 (CONTRACTS §§16-19): hypothetical-mode sims don't have a user-built
+# audience profile. They reach out to a "general public" archetype mix that
+# matches what /seed?mode=sample would have produced. The id is a deliberate
+# sentinel — it does NOT match the `aud_<10 hex>` regex used at the wire
+# boundary (10 hex chars), and is never returned to the wire from /seed.
+# It only ever appears as `simulations.audience_id` for hypothetical rows so
+# the schema's NOT NULL constraint is satisfied without a destructive table
+# rebuild. Routing on `mode` (not on this id) keeps the read path unambiguous.
+GENERAL_PUBLIC_AUDIENCE: dict[str, Any] = {
+    "id": "aud_public____",
+    "name": "General public",
+    "size": 10000,
+    "archetypes": [],  # populated lazily below to avoid forward-ref ordering
+}
+
+
 def default_audience_archetypes() -> list[dict[str, Any]]:
     """The 6 swarm archetypes, returned as the /seed v1 archetype list.
 
@@ -1101,6 +1126,11 @@ def default_audience_archetypes() -> list[dict[str, Any]]:
         {"id": k, "name": display_names[k], "share": floors[k]}
         for k in ARCHETYPES
     ]
+
+
+# Lazy-populate GENERAL_PUBLIC_AUDIENCE archetypes now that
+# default_audience_archetypes is defined.
+GENERAL_PUBLIC_AUDIENCE["archetypes"] = default_audience_archetypes()
 
 
 # --------------------------------------------------------------- v3 /report
@@ -1400,8 +1430,16 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
     # posts from get_simulation_full). Cheap second SELECT.
     from .db import get_simulation
     sim_row = get_simulation(sim_id)
+    # v4: hypothetical-mode sims weren't built against a user audience — route
+    # them to the GENERAL_PUBLIC_AUDIENCE so the report renders "General public"
+    # instead of "Unknown audience".
+    mode = (sim_row or {}).get("mode") if sim_row else None
+    if mode not in ("business", "hypothetical"):
+        mode = "business"
     audience: dict[str, Any] | None = None
-    if sim_row and sim_row.get("audience_id"):
+    if mode == "hypothetical":
+        audience = GENERAL_PUBLIC_AUDIENCE
+    elif sim_row and sim_row.get("audience_id"):
         audience = get_audience(sim_row["audience_id"])
     audience_label = audience.get("name") if audience else "Unknown audience"
     audience_blurb = _audience_blurb(audience) if audience else "Unknown audience"
@@ -1502,4 +1540,8 @@ async def generate_report(sim_id: str, *, client: Any | None = None) -> dict[str
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "model": GEMINI_ANALYSIS_MODEL,
         "report": parsed_report,
+        # v4 (CONTRACTS §17): mode is surfaced in the wire shape and persisted
+        # alongside the report payload. Legacy cached rows that pre-date this
+        # field still validate because ReportResponse.mode defaults to "business".
+        "mode": mode,
     }
