@@ -62,6 +62,11 @@ export interface ServerAgent {
   handle: string;
   archetype: Archetype;
   audience: AudienceKind;
+  // v7 §25 — additive optional persona richness from the genesis pass.
+  // Older sims (v1-v6 replays) won't include these; FE must degrade silently.
+  bio?: string;
+  profession?: string | null;
+  hot_buttons?: string[] | null;
 }
 
 export interface ServerPost {

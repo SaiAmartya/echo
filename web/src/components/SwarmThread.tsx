@@ -29,6 +29,11 @@ type Agent = {
   handle: string;
   archetype: Archetype;
   audience: AudienceKind;
+  // v7 §25 — optional persona richness, surfaced on the avatar hover tooltip
+  // in TweetCard. Older sims won't have these and the tooltip is skipped.
+  bio?: string;
+  profession?: string | null;
+  hot_buttons?: string[] | null;
 };
 
 type ThreadEvent = {
@@ -90,6 +95,8 @@ function normalize(
     agents.push({
       id: p.agent.id, name: p.agent.name, handle: p.agent.handle,
       archetype: p.agent.archetype, audience: p.agent.audience,
+      bio: p.agent.bio, profession: p.agent.profession,
+      hot_buttons: p.agent.hot_buttons,
     });
   }
   return { events, agents };
@@ -356,6 +363,8 @@ function ThreadColumn({
                   name: topAgent.name,
                   handle: topAgent.handle,
                   archetype: topAgent.archetype,
+                  bio: topAgent.bio,
+                  profession: topAgent.profession,
                 }}
                 parentHandle={undefined}
                 now={now}
@@ -405,6 +414,8 @@ function ThreadColumn({
                           name: ag.name,
                           handle: ag.handle,
                           archetype: ag.archetype,
+                          bio: ag.bio,
+                          profession: ag.profession,
                         }}
                         parentHandle={parentHandleOf(d.parent)}
                         now={now}

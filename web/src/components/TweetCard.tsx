@@ -71,6 +71,11 @@ export interface TweetCardAgent {
   name: string;
   handle: string;
   archetype: Archetype;
+  // v7 §25 — optional persona richness. When `bio` is non-empty the avatar
+  // surfaces a hover tooltip; otherwise the tooltip is skipped (v1-v6 replay
+  // graceful degradation).
+  bio?: string;
+  profession?: string | null;
 }
 
 export interface TweetCardProps {
@@ -252,26 +257,8 @@ function TweetCardImpl({
   return (
     <article className="echo-tweet">
       <div style={{ display: "flex", gap: 12 }}>
-        {/* Avatar with archetype-tinted ring */}
-        <div
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 999,
-            flexShrink: 0,
-            background: "var(--surface-3)",
-            border: `1px solid ${ringColor}80`,
-            boxShadow: `0 0 0 1px ${ringColor}26 inset`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
-            color: "var(--fg-1)",
-          }}
-        >
-          {getInitials(agent.name)}
-        </div>
+        {/* Avatar with archetype-tinted ring + v7 persona tooltip on hover */}
+        <AvatarWithTooltip agent={agent} ringColor={ringColor} />
 
         {/* Body column */}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -378,6 +365,86 @@ function ActionItem({
       </span>
       {count !== undefined && <span>{count}</span>}
     </span>
+  );
+}
+
+// Avatar + v7 persona tooltip on hover. Above-right by default, flips
+// below-right if there isn't room above. Skipped when bio is empty/null
+// (v1-v6 replay graceful degradation). Tooltip uses pointer-events:none +
+// position:absolute so it never reflows surrounding posts. Hover + flip
+// state are client-only; SSR matches the first client paint (tooltip absent).
+function AvatarWithTooltip({
+  agent, ringColor,
+}: { agent: TweetCardAgent; ringColor: string }) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [hovered, setHovered] = useState(false);
+  const [mounted, setMounted] = useState(false); // keep in DOM for fade-out
+  const [flipBelow, setFlipBelow] = useState(false);
+  const bio = (agent.bio ?? "").trim();
+  const profession = (agent.profession ?? "").trim();
+  const hasTooltip = bio.length > 0;
+  useEffect(() => {
+    if (!hovered || !wrapperRef.current) return;
+    const r = wrapperRef.current.getBoundingClientRect();
+    setFlipBelow(r.top < 120); // need ~110px headroom above
+  }, [hovered]);
+  return (
+    <div
+      ref={wrapperRef}
+      onMouseEnter={() => { if (hasTooltip) { setMounted(true); setHovered(true); } }}
+      onMouseLeave={() => setHovered(false)}
+      style={{ position: "relative", flexShrink: 0 }}
+    >
+      <div style={{
+        width: 36, height: 36, borderRadius: 999,
+        background: "var(--surface-3)",
+        border: `1px solid ${ringColor}80`,
+        boxShadow: `0 0 0 1px ${ringColor}26 inset`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--fg-1)",
+        cursor: hasTooltip ? "help" : "default",
+      }}>
+        {getInitials(agent.name)}
+      </div>
+      {hasTooltip && mounted && (
+        <div aria-hidden={!hovered} style={{
+          position: "absolute",
+          ...(flipBelow ? { top: "calc(100% + 6px)" } : { bottom: "calc(100% + 6px)" }),
+          left: "calc(100% + 6px)",
+          zIndex: 30, width: "max-content", maxWidth: 280,
+          background: "var(--surface-2)",
+          border: "1px solid var(--border)",
+          borderRadius: 8, padding: "8px 10px",
+          boxShadow: "0 6px 18px rgba(0, 0, 0, 0.35)",
+          pointerEvents: "none",
+          opacity: hovered ? 1 : 0,
+          transition: hovered ? "opacity 150ms ease-out" : "opacity 80ms ease-in",
+          color: "var(--fg-1)", fontSize: 12, lineHeight: 1.4,
+        }}>
+          <div style={{
+            fontFamily: "var(--font-mono)", fontSize: 11,
+            color: "var(--fg-3)", marginBottom: 4,
+          }}>
+            {agent.handle}
+          </div>
+          <div style={{
+            color: "var(--fg-1)", wordBreak: "break-word",
+            display: "-webkit-box", WebkitLineClamp: 3,
+            WebkitBoxOrient: "vertical", overflow: "hidden",
+          }}>
+            {bio}
+          </div>
+          {profession && (
+            <div style={{
+              marginTop: 5, fontSize: 11,
+              color: "var(--fg-3)", fontStyle: "italic",
+            }}>
+              {profession}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
