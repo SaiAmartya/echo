@@ -17,12 +17,14 @@ When you do verify, **say so in your commit message or report-back**: e.g., "goo
 
 Echo has a hackathon budget. Limits are LOCKED, not advisory:
 
-- **≤100 LLM calls per simulation.** Counter raises `BudgetExceededError` on the 101st call. Never silent fan-out.
-- **≤6 concurrent calls** via `asyncio.Semaphore(6)` (process-global).
-- **Model = `gemini-2.5-flash-lite`.** No upgrades without team-lead approval.
-- **≤256 output tokens per call.**
+- **≤1200 LLM calls per simulation.** Counter raises `BudgetExceededError` on the 1201st call. Never silent fan-out.
+- **≤12 concurrent calls** via `asyncio.Semaphore(12)` (process-global).
+- **Model = `gemini-2.5-flash-lite`** for per-persona / per-archetype reactions; **`gemini-3-flash-preview`** (thinking) for genesis + analysis + /report only. No additional model upgrades without team-lead approval.
+- **≤256 output tokens per per-persona call** (analysis/report calls have higher caps because they emit structured JSON).
 
-> **Note (Q1, 2026-05-02):** raised from 40 → 100 to support user-requested rounds=15 (6 archetypes × 15 + 1 analysis + 1 report = 92 calls). Cost stays acceptable (~$0.01/sim with mixed-model strategy: flash-lite reactions + Gemini 3 thinking analysis/report). Concurrency cap unchanged.
+> **Note (Q1, 2026-05-02):** raised from 40 → 100 to support user-requested rounds=15 (6 archetypes × 15 + 1 analysis + 1 report = 92 calls).
+>
+> **Note (Z2, 2026-05-02):** raised from 100 → 1200, concurrency 6 → 12 to admit the v7 agentic engine. v7 sizing math: 50 personas × 8 rounds + 1 genesis + 1 analysis + 1 report ≈ 403 calls; 100p × 10r upper-bound ≈ 1003 calls. v6 sims still spend ~92 calls, so the raised cap is a no-op for v6 — there is **zero regression** for v6 cost. Cost at 50p × 8r ≈ $0.02/sim (most calls are Flash-Lite). Concurrency 12 keeps a single round wave at ~4-5 batches × ~2s = 8-12s.
 
 If a phase looks like it'll cost more than its allotted estimate in `.team/STATUS.md` budget ledger, stop and message team-lead before spending.
 

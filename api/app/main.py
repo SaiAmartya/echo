@@ -18,17 +18,27 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from sse_starlette.sse import EventSourceResponse
+# Load api/.env before anything reads os.environ (firebase-admin creds,
+# GEMINI_API_KEY, etc.). Idempotent — safe if already loaded by swarm.py.
+from dotenv import load_dotenv
 
-from .db import (
+load_dotenv()
+
+from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+from sse_starlette.sse import EventSourceResponse  # noqa: E402
+
+from .auth import current_user_uid, current_user_uid_from_query  # noqa: E402
+from .db import (  # noqa: E402
     get_analysis,
     get_audience,
+    get_audience_unscoped,
+    get_personas,
     get_report,
     get_simulation,
     get_simulation_full,
+    get_simulation_unscoped,
     init_db,
     insert_audience,
     insert_round_event,
@@ -37,7 +47,7 @@ from .db import (
     upsert_analysis,
     upsert_report,
 )
-from .swarm import (
+from .swarm import (  # noqa: E402
     GENERAL_PUBLIC_AUDIENCE,
     GeminiUnavailableError,
     ReportSimNotFoundError,
@@ -115,6 +125,18 @@ class SimulateStartRequest(BaseModel):
     # raised in lock-step (swarm.MAX_LLM_CALLS 40 → 100) to fit
     # 6 archetypes × 15 rounds + 1 analysis + 1 report = 92 calls.
     rounds: int = Field(default=5, ge=5, le=15)
+    # When true, the swarm runs one extra Gemini call with google_search
+    # grounding before the rounds, so reactions are anchored to recent
+    # real-world facts the swarm model would otherwise miss. Adds +1 to the
+    # per-sim budget (93/100 worst case at rounds=15; 94/100 alongside Z1
+    # persona genesis).
+    web_grounding: bool = False
+    # Z1 / v7 (CONTRACTS §27): persona pool size for the agentic engine.
+    # Optional and additive — only takes effect when ECHO_ENGINE_VERSION="v7"
+    # (server-side check in swarm.run_simulation). v6 callers may include this
+    # field freely; the server ignores it. Range [30, 100] enforced here so
+    # out-of-range bodies fail with HTTP 422 before any state is persisted.
+    persona_count: int | None = Field(default=None, ge=30, le=100)
 
 
 class SimulateStartResponse(BaseModel):
@@ -165,6 +187,12 @@ class ReplayAgent(BaseModel):
     handle: str
     archetype: Literal["skeptic", "enthusiast", "curious", "practitioner", "pedant", "lurker"]
     audience: Literal["target", "public"]
+    # Z2 / v7 (CONTRACTS §25): rich persona fields surfaced on the wire for
+    # v7 sims; empty/null for v6 sims and pre-Z1 replays. Old FE silently
+    # ignores; new FE surfaces via tooltip / panel.
+    bio: str = ""
+    profession: str | None = None
+    hot_buttons: list[str] | None = None
 
 
 class ReplayPost(BaseModel):
@@ -254,7 +282,10 @@ def _bad(status: int, code: str, detail: str) -> HTTPException:
 
 
 @app.post("/seed", response_model=SeedResponse)
-def seed(req: SeedRequest) -> SeedResponse:
+def seed(
+    req: SeedRequest,
+    uid: str = Depends(current_user_uid),
+) -> SeedResponse:
     if req.mode == "csv" and not (req.payload and req.payload.strip()):
         raise _bad(400, "bad_payload", "CSV payload required for mode=csv")
     if req.mode == "oauth" and not (req.payload and req.payload.strip()):
@@ -272,7 +303,7 @@ def seed(req: SeedRequest) -> SeedResponse:
         size = 8420
 
     archetypes = default_audience_archetypes()
-    insert_audience(audience_id, name, size, archetypes)
+    insert_audience(audience_id, uid, name, size, archetypes)
     return SeedResponse(
         audience_id=audience_id,
         name=name,
@@ -282,7 +313,10 @@ def seed(req: SeedRequest) -> SeedResponse:
 
 
 @app.post("/simulate/start", response_model=SimulateStartResponse)
-def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
+def simulate_start(
+    req: SimulateStartRequest,
+    uid: str = Depends(current_user_uid),
+) -> SimulateStartResponse:
     # v4 (CONTRACTS §§16-19):
     #   - business    → audience_id REQUIRED, looked up via get_audience(); 404 if missing.
     #   - hypothetical → audience_id IGNORED, persisted as the GENERAL_PUBLIC_AUDIENCE
@@ -296,7 +330,7 @@ def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
                 "audience_id_required_for_business_mode",
                 "audience_id is required when mode=business",
             )
-        aud = get_audience(req.audience_id)
+        aud = get_audience(req.audience_id, uid)
         if not aud:
             raise _bad(404, "unknown_audience", "audience not found")
         stored_audience_id = req.audience_id
@@ -304,31 +338,60 @@ def simulate_start(req: SimulateStartRequest) -> SimulateStartResponse:
         stored_audience_id = GENERAL_PUBLIC_AUDIENCE["id"]
 
     sim_id = f"sim_{uuid.uuid4().hex[:10]}"
-    insert_simulation(sim_id, stored_audience_id, req.draft, req.rounds, mode=req.mode)
+    # Persist both feature flags on the sim row so /simulate/stream can plumb
+    # them through to run_simulation without an extra request body.
+    #   - web_grounding: enables the google_search pre-call (default 0).
+    #   - persona_count: Z1 / v7 persona pool size; NULL for v6 sims (column
+    #     added by db.init_db migration).
+    insert_simulation(
+        sim_id,
+        uid,
+        stored_audience_id,
+        req.draft,
+        req.rounds,
+        mode=req.mode,
+        web_grounding=req.web_grounding,
+        persona_count=req.persona_count,
+    )
     return SimulateStartResponse(simulation_id=sim_id, rounds=req.rounds, status="running")
 
 
 @app.get("/simulate/stream")
 async def simulate_stream(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid_from_query),
 ) -> EventSourceResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
-
     # v4 (CONTRACTS §§16-19): hypothetical-mode sims weren't bound to a user
     # audience profile — short-circuit to GENERAL_PUBLIC_AUDIENCE so /simulate/stream
-    # works without a real row in the audiences table.
+    # works without a real row in the audiences table. Business-mode lookups
+    # use get_audience_unscoped because we already verified ownership of the
+    # parent simulation via get_simulation(simulation_id, uid) above.
     sim_mode = sim.get("mode") if sim.get("mode") in ("business", "hypothetical") else "business"
     if sim_mode == "hypothetical":
         audience = GENERAL_PUBLIC_AUDIENCE
     else:
-        audience = get_audience(sim["audience_id"])
+        audience = get_audience_unscoped(sim["audience_id"])
         if not audience:
             raise _bad(404, "unknown_audience", "audience not found")
 
     draft = sim["draft"]
     rounds = int(sim["rounds"])
+    # Stored as INTEGER 0/1 in SQLite — cast to bool. Defensive default for
+    # rows written before the web_grounding migration ran.
+    web_grounding = bool(sim.get("web_grounding") or 0)
+    # Z1 / v7: surface the persisted persona_count (NULL for v6 sims). The
+    # column was added by an idempotent ALTER TABLE migration, so older sim
+    # rows transparently read back as None here.
+    persona_count_raw = sim.get("persona_count") if isinstance(sim, dict) else None
+    persona_count: int | None = (
+        int(persona_count_raw)
+        if isinstance(persona_count_raw, int)
+        or (isinstance(persona_count_raw, str) and persona_count_raw.isdigit())
+        else None
+    )
 
     async def event_gen():
         try:
@@ -338,6 +401,8 @@ async def simulate_stream(
                 audience=audience,
                 rounds=rounds,
                 mode=sim_mode,
+                web_grounding=web_grounding,
+                persona_count=persona_count,
             ):
                 event_name: str = evt.get("event", "message")
                 data: Any = evt.get("data", {})
@@ -386,8 +451,9 @@ async def simulate_stream(
 @app.get("/analyze", response_model=AnalyzeResponse)
 def analyze(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid),
 ) -> AnalyzeResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
 
@@ -408,9 +474,12 @@ def analyze(
 # Wire shape locked in CONTRACTS.md §8/§9. v1 endpoints above are untouched.
 
 @app.get("/history", response_model=HistoryResponse)
-def history(limit: int = Query(default=50, ge=1, le=200)) -> HistoryResponse:
+def history(
+    limit: int = Query(default=50, ge=1, le=200),
+    uid: str = Depends(current_user_uid),
+) -> HistoryResponse:
     try:
-        items = list_simulations(limit)
+        items = list_simulations(uid, limit)
         return HistoryResponse(items=[HistoryItem(**it) for it in items])
     except HTTPException:
         raise
@@ -435,8 +504,9 @@ _REPORT_LOCK_TIMEOUT = 30.0
 async def report(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
     regenerate: bool = Query(default=False),
+    uid: str = Depends(current_user_uid),
 ) -> ReportResponse:
-    sim = get_simulation(simulation_id)
+    sim = get_simulation(simulation_id, uid)
     if not sim:
         raise _bad(404, "unknown_simulation", "simulation not found")
 
@@ -514,9 +584,10 @@ async def report(
 @app.get("/simulate/replay", response_model=ReplayResponse)
 def simulate_replay(
     simulation_id: str = Query(..., pattern=_SIMULATION_ID_PATTERN),
+    uid: str = Depends(current_user_uid),
 ) -> ReplayResponse:
     try:
-        full = get_simulation_full(simulation_id)
+        full = get_simulation_full(simulation_id, uid)
         if full is None:
             raise _bad(404, "unknown_simulation", "simulation not found")
 
@@ -537,21 +608,27 @@ def simulate_replay(
         mode_raw = full.get("mode")
         mode = mode_raw if mode_raw in ("business", "hypothetical") else "business"
 
-        # v6 (CONTRACTS §24): re-derive engagement on the fly so pre-v6
-        # sims (whose stored round_events JSON has no like_count/reply_count)
-        # still surface engagement at replay time. Algorithm is deterministic
-        # by (sim_id, post_id, round) — same sim → same like_counts on every
-        # replay (L22). For sims that already wrote engagement into the JSON,
-        # this just recomputes the same values.
+        # Z2 / v7 (CONTRACTS §29): replay routes on whether the persisted
+        # round_events JSON carries `persona_actions` (v7 — LLM-emergent
+        # likes already in posts; just render) vs. v6 (deterministic
+        # re-derivation via attach_engagement). The cheapest, most robust
+        # signal is the `personas` table: non-empty rows for the sim →
+        # genesis ran → this is a v7 sim. v6 sims never write to personas.
         posts_raw: list[dict[str, Any]] = list(full.get("posts") or [])
-        if posts_raw:
+        is_v7_sim = bool(get_personas(full["simulation_id"]))
+        if posts_raw and not is_v7_sim:
+            # v6 deterministic re-derivation. Same (sim_id, post_id, round)
+            # → same like_counts on every replay (L22).
             final_round = max(int(p.get("round", 0) or 0) for p in posts_raw)
-            sim_row = get_simulation(full["simulation_id"])
+            # Ownership already verified by get_simulation_full(sim_id, uid)
+            # above; the unscoped lookups here are safe and avoid a redundant
+            # uid filter (the parent sim's uid trivially matches).
+            sim_row = get_simulation_unscoped(full["simulation_id"])
             if mode == "hypothetical":
                 replay_audience = GENERAL_PUBLIC_AUDIENCE
             elif sim_row and sim_row.get("audience_id"):
                 replay_audience = (
-                    get_audience(sim_row["audience_id"]) or GENERAL_PUBLIC_AUDIENCE
+                    get_audience_unscoped(sim_row["audience_id"]) or GENERAL_PUBLIC_AUDIENCE
                 )
             else:
                 replay_audience = GENERAL_PUBLIC_AUDIENCE
@@ -561,6 +638,9 @@ def simulate_replay(
                 current_round=final_round,
                 audience=replay_audience,
             )
+        # v7 path: posts already carry like_count + reply_count from the
+        # persisted round_event JSON (engine wrote them at SSE emit time).
+        # Replay reads bytes-for-bytes from disk — Gate 6 replay parity.
 
         return ReplayResponse(
             simulation_id=full["simulation_id"],

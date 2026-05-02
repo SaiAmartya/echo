@@ -2,6 +2,8 @@
 // Wire format: see /.team/CONTRACTS.md (LOCKED v1).
 // All paths are routed through Next's /api/* rewrite -> FastAPI on :8000.
 
+import { getCurrentIdToken } from "./firebase/auth";
+
 export type Archetype =
   | "skeptic"
   | "enthusiast"
@@ -41,6 +43,11 @@ export interface SimulateStartRequest {
   mode: SimulationMode;
   audience_id?: string;
   rounds: number;
+  // When true, the backend runs one extra Gemini call with google_search
+  // grounding before the rounds so reactions are anchored to recent real-world
+  // facts the swarm model would otherwise miss (e.g. a model release that
+  // postdates training).
+  web_grounding?: boolean;
 }
 
 export interface SimulateStartResponse {
@@ -55,6 +62,11 @@ export interface ServerAgent {
   handle: string;
   archetype: Archetype;
   audience: AudienceKind;
+  // v7 §25 — additive optional persona richness from the genesis pass.
+  // Older sims (v1-v6 replays) won't include these; FE must degrade silently.
+  bio?: string;
+  profession?: string | null;
+  hot_buttons?: string[] | null;
 }
 
 export interface ServerPost {
@@ -216,18 +228,32 @@ async function parseError(res: Response): Promise<ApiError> {
   // Map a few well-known statuses where the server didn't set a code
   if (code === "internal_error") {
     if (res.status === 400) code = "bad_request";
-    else if (res.status === 401) code = "oauth_failed";
+    else if (res.status === 401) code = "auth_invalid";
     else if (res.status === 404) code = "not_found";
     else if (res.status === 409) code = "analysis_pending";
     else if (res.status === 502) code = "gemini_unavailable";
   }
+  // Unauthenticated → bounce to sign-in. The route guards normally catch this
+  // pre-flight, but a stale token (deleted user, revoked session) only surfaces
+  // here at request time.
+  if (res.status === 401 && typeof window !== "undefined") {
+    if (!window.location.pathname.startsWith("/signin")) {
+      window.location.replace("/signin");
+    }
+  }
   return new ApiError({ code, message, status: res.status });
 }
 
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getCurrentIdToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const auth = await authHeaders();
   const res = await fetch(path, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await parseError(res);
@@ -235,7 +261,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path, { method: "GET" });
+  const auth = await authHeaders();
+  const res = await fetch(path, { method: "GET", headers: auth });
   if (!res.ok) throw await parseError(res);
   return (await res.json()) as T;
 }
@@ -250,8 +277,11 @@ export function simulateStart(
   return postJson<SimulateStartResponse>("/api/simulate/start", body);
 }
 
-export function simulateStreamUrl(simulationId: string): string {
-  return `/api/simulate/stream?simulation_id=${encodeURIComponent(simulationId)}`;
+export async function simulateStreamUrl(simulationId: string): Promise<string> {
+  const token = await getCurrentIdToken();
+  const params = new URLSearchParams({ simulation_id: simulationId });
+  if (token) params.set("token", token);
+  return `/api/simulate/stream?${params.toString()}`;
 }
 
 export function analyze(simulationId: string): Promise<Analysis> {

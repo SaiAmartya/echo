@@ -29,6 +29,12 @@ Updated by each agent after every meaningful task. One line per agent.
 | frontend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 07:00 | R2 done (commit 37335b0) — parent-child tree rendering with level-1 indent + vertical thread line; FLIP-based engagement-DESC re-sort animation (600ms cubic-bezier, "thread settles" vibe) on report-pending phase; TweetCard drops cosmetic mulberry32, consumes wire like_count/reply_count with growth-detected heart-pop. 8/8 Chrome MCP verifications, GIF captured at ~/Downloads/r2_engagement_sort.gif (2.7MB, 14s). 213 posts initial render in 265ms. Despawned. |
 | frontend-engineer-9 (opus, general-purpose) | ✅ done | 2026-05-02 07:30 | S1 done (commit 79109b9) — inline report panel: extracted ReportBody + ReportSidePanel, /simulating phase machine adds "ready" (no more redirect), subtle fullscreen icon top-right, /history click → /simulating replay. 10/10 Chrome MCP verifications, GIF at ~/Downloads/s1_inline_report.gif (5.3MB, 27 frames). Despawned. |
 | backend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 07:35 | T1 done (commit 36e726a) — minor divisive-content bias: `_sentiment_resonance` peak 0.7→0.8 (extreme posts closer to peak, |s|=1.0 lifts +0.094); attach_engagement post-pass controversy multiplier (≤+15% on posts whose ≥2 children disagree in sign). Module-top constants `_SENT_RESONANCE_PEAK` + `_CONTROVERSY_BONUS_MAX` for dialing. 4/4 scenarios verified — P6 calibration intact (Canada -0.494, Notion +0.135, schools -0.215, athletes -0.089). Determinism preserved. Despawned. |
+| backend-engineer-8 (opus, general-purpose) | ✅ done | 2026-05-02 08:25 | Z1 done (commit b384005) — persona genesis (`api/app/persona_genesis.py`) + DB persistence. Single Gemini-3 thinking call generates rich personas (name, handle, archetype, audience, bio, profession, hot_buttons) with diversity guardrails. 9/9 verifications + 5 personas confirmed distinct (Florence/London/Phoenix/Atlanta/SF, ages 24-70s, 5 different professions). v6 engine still drives sim. Caveats: live `api/echo.db` was pre-auth-migration; agent moved aside as `echo.db.bak.preZ1` and let `init_db` rebuild clean (history recoverable via small migration). uvicorn requires `FIREBASE_AUTH_DISABLED=1` shell-override for local dev. Despawned. |
+| backend-engineer-9 (opus, general-purpose) | ✅ done | 2026-05-02 09:00 | Z2 done (commit 74f6c4d) — agentic per-persona engine. v7 path adds `_call_persona`/`_system_for_persona`/`_aggregate_round_actions`. v6 path untouched, env-gated. 7/7 gates green: Canada -0.645, 50p×8r=84s/403 calls, 100p×10r=127s/1003 calls. Profession-traceable voices (Toronto line cook on housing, Accra pharmacist on drug supply chains). Despawned. |
+| in-person teammate (DhairyaS450) | ✅ shipped | 2026-05-02 ~09:15 | Web grounding (commit e0d1e7d) — single Gemini-3 google_search pre-call upfront per sim, ≤450 chars context injected into reaction system prompts. Defensive failure isolation, +1 budget, FE toggle in compose. Audit verdict: solid; matches user's described pipeline. Lead patched v7 plumbing (5982ce3); teammate independently shipped same fix (0da2d6f) — auto-merged at 93dbb5c. |
+| frontend-engineer-10-2 (opus, general-purpose) | ✅ done | 2026-05-02 09:25 | Z3 done (commit 95d0c63) — avatar hover tooltip surfaces v7 persona bio + profession; graceful skip for v1-v6 replays. TweetCard 461 lines, position-flipping, 150ms fade. Browser E2E was blocked by Firebase sign-in — lead shipped FE auth-bypass `NEXT_PUBLIC_DISABLE_AUTH=1` (commit 4014d15) as follow-up so users can hit the app without firebase. Despawned. |
+| backend-engineer-10-2 (opus, general-purpose) | ✅ done | 2026-05-02 09:32 | Z6 done (commit cf2e411) — `ECHO_DEV_MODE=1` flag + Zipfian power-law on v7 likes. Caught + fixed compounding bug (4.4M-likes pre-fix) via raw-counts sidecar. 5/5 tests pass: top-1=1705 / median=0 / bottom=0 (sharp Zipf), dev-mode produces 83-call sims at 5r/16p, replay determinism preserved (sha256 match), v6 unaffected, P6 mean -0.66 intact. Lead live-verified post-push: 5r×16p sim @ 28s, top5=[295,126,65,23,15], verdict=rethink. Despawned. |
+| tui-engineer-1 (opus, general-purpose) | 🟡 in flight | 2026-05-02 09:35 | TUI HTTP-client alternate to GUI (Task #31). Cherry-picks visual design from PR #1 but rewrites as pure HTTP client over /simulate/* + /report — REJECTS PR #1's parallel `api/engine/` rewrite (would clobber v7). |
 
 ## Phase tracker
 
@@ -57,6 +63,19 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **R2** — indented thread tree + FLIP engagement-DESC re-sort (commit 37335b0, pushed). 8/8 Chrome MCP verifications + GIF.
 - [x] **S1** — Inline report panel + subtle fullscreen toggle (commit 79109b9, pushed). 10/10 Chrome MCP verifications + GIF (~/Downloads/s1_inline_report.gif).
 - [x] **T1** — Minor divisive-content bias in engagement algorithm (commit 36e726a, pushed). 4/4 scenarios verified, P6 realism preserved.
+- [ ] **Z (Agentic Swarm Redesign — Crowd v7)** — per-persona LLM agents (vs 6-archetype-batched). Plan: `~/.claude/plans/melodic-mixing-sunset.md`.
+  - [x] **Z0** — CONTRACTS v7 §§25-30 LOCKED (commit 1da6277, pushed)
+  - [x] **Z1** — Persona genesis + DB persistence (commit b384005, pushed). v6 engine still drives sim. DB rebuilt clean (.bak.preZ1 preserves 67 prior sims; recoverable via user_id migration).
+  - [x] **Z2** — Engine rewrite (commit 74f6c4d, pushed). 7/7 gates; 50p×8r=84s/403 calls. Profession-traceable v7 voices.
+  - [x] **Web grounding** — teammate-shipped (e0d1e7d) + lead v7 plumbing (5982ce3). Audit-verified by lead.
+  - [x] **Z3** — Frontend persona surfacing (commit 95d0c63, pushed). Avatar hover tooltip with persona bio + profession.
+  - [x] **FE auth-bypass** — `NEXT_PUBLIC_DISABLE_AUTH=1` (commit 4014d15, pushed). Lead-shipped follow-up to unblock dev without Firebase sign-in.
+  - [x] **Z6** — Power-law engagement + ECHO_DEV_MODE (commit cf2e411, pushed). 5/5 tests, lead-live-verified.
+  - [ ] **Z7** — Long-thread reply truncation UI (queued post-Z3+Z6).
+  - [ ] **Z4** — Tuning + LEARNINGS (lead) — also catches `replying_to: p6` schema-leak.
+  - [ ] **TUI** — Alternate interface (Task #31, in flight) — HTTP-client refactor of PR #1.
+  - [ ] **Z4** — Tuning + LEARNINGS (lead)
+  - [ ] **Z5** — Ship
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 

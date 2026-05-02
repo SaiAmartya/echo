@@ -9,6 +9,7 @@ import { Composer } from "@/components/Composer";
 import { SEED_DRAFT } from "@/components/SwarmThread";
 import { Icon } from "@/components/ui/Primitives";
 import { api, ApiError, type Audience, type SimulationMode } from "@/lib/api";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 
 // v5 §20 — rounds range expanded to [5, 15]. Backend now 422s on rounds<5.
 const ROUND_OPTIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
@@ -17,6 +18,7 @@ const DEFAULT_ROUNDS = 5;
 type Mode = SimulationMode;
 const MODE_STORAGE_KEY = "echo:mode";
 const ROUNDS_STORAGE_KEY = "echo:rounds";
+const WEB_GROUNDING_STORAGE_KEY = "echo:webGrounding";
 
 function isMode(v: string | null): v is Mode {
   return v === "hypothetical" || v === "business";
@@ -33,6 +35,11 @@ function loadRounds(): number {
   const raw = window.sessionStorage.getItem(ROUNDS_STORAGE_KEY);
   const n = raw == null ? NaN : Number.parseInt(raw, 10);
   return ROUND_OPTIONS.includes(n as (typeof ROUND_OPTIONS)[number]) ? n : DEFAULT_ROUNDS;
+}
+
+function loadWebGrounding(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.sessionStorage.getItem(WEB_GROUNDING_STORAGE_KEY) === "1";
 }
 
 const MODE_OPTIONS: ReadonlyArray<{ value: Mode; label: string }> = [
@@ -68,11 +75,20 @@ function loadDraft(): string {
 }
 
 export default function ComposePage() {
+  return (
+    <RequireAuth>
+      <ComposePageInner />
+    </RequireAuth>
+  );
+}
+
+function ComposePageInner() {
   const router = useRouter();
   const [draft, setDraft] = useState(SEED_DRAFT);
   const [rounds, setRounds] = useState<number>(DEFAULT_ROUNDS);
   const [audience, setAudience] = useState<Audience | null>(null);
   const [mode, setMode] = useState<Mode>("hypothetical");
+  const [webGrounding, setWebGrounding] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // `hydrated` gates the persist-on-change effects so they don't run on the
@@ -90,6 +106,7 @@ export default function ComposePage() {
     setDraft(loadDraft());
     setMode(loadMode());
     setRounds(loadRounds());
+    setWebGrounding(loadWebGrounding());
     setHydrated(true);
   }, []);
 
@@ -111,6 +128,12 @@ export default function ComposePage() {
     window.sessionStorage.setItem(MODE_STORAGE_KEY, mode);
   }, [mode, hydrated]);
 
+  // Persist the web-grounding toggle so it survives navigation.
+  useEffect(() => {
+    if (typeof window === "undefined" || !hydrated) return;
+    window.sessionStorage.setItem(WEB_GROUNDING_STORAGE_KEY, webGrounding ? "1" : "0");
+  }, [webGrounding, hydrated]);
+
   const onRun = async () => {
     if (submitting) return;
     setSubmitting(true);
@@ -124,6 +147,7 @@ export default function ComposePage() {
           draft,
           mode: "hypothetical",
           rounds,
+          web_grounding: webGrounding,
         });
       } else {
         // Business: ensure we have an audience cached. If not, seed the sample
@@ -139,6 +163,7 @@ export default function ComposePage() {
           mode: "business",
           audience_id: aud.audience_id,
           rounds,
+          web_grounding: webGrounding,
         });
       }
       sessionStorage.setItem("echo:simulation", JSON.stringify(resp));
@@ -190,8 +215,20 @@ export default function ComposePage() {
     pointerEvents: "none" as const,
   };
 
+  // Active vs inactive styling for the web-grounding toggle. When ON, lift the
+  // chip to the brand accent so it's obvious extra latency + cost is in play.
+  const groundingChipStyle = {
+    ...chipStyle,
+    cursor: "pointer" as const,
+    background: webGrounding ? "rgba(125, 212, 154, 0.12)" : "var(--surface-2)",
+    border: webGrounding
+      ? "1px solid rgba(125, 212, 154, 0.55)"
+      : "1px solid var(--border)",
+    color: webGrounding ? "#7dd49a" : "var(--fg-2)",
+  };
+
   const audienceSlot = (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
       <span style={chipStyle}>
         <Icon name="users" size={13} />
         <select
@@ -225,6 +262,31 @@ export default function ComposePage() {
         </select>
         <Icon name="chevronDown" size={12} style={chevronStyle} />
       </span>
+      <button
+        type="button"
+        onClick={() => setWebGrounding((v) => !v)}
+        style={groundingChipStyle}
+        aria-pressed={webGrounding}
+        aria-label="Toggle Google Search grounding"
+        title={
+          webGrounding
+            ? "Web grounding ON — agents see live Google Search context"
+            : "Web grounding OFF — agents react from training data only"
+        }
+      >
+        <Icon name="search" size={13} />
+        <span style={{ fontSize: 12 }}>web grounding</span>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            opacity: 0.85,
+            marginLeft: 2,
+          }}
+        >
+          {webGrounding ? "on" : "off"}
+        </span>
+      </button>
     </span>
   );
 
