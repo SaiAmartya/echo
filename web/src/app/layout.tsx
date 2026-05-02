@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { AuthProvider } from "@/components/auth/AuthProvider";
 
 export const metadata: Metadata = {
-  title: "Echo — What would happen if...",
+  title: "Echo",
   description: "Simulate public reaction to anything.",
 };
 
