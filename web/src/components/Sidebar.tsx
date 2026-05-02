@@ -9,8 +9,6 @@ type Item = { id: SidebarKey; label: string; icon: IconName; href: string };
 const items: Item[] = [
   { id: "compose",  label: "Compose",  icon: "plus",    href: "/compose" },
   { id: "history",  label: "History",  icon: "history", href: "/history" },
-  { id: "audience", label: "Audience", icon: "users",   href: "/" },
-  { id: "flags",    label: "Flagged",  icon: "alert",   href: "/results" },
 ];
 
 export function Sidebar({ active }: { active: SidebarKey }) {

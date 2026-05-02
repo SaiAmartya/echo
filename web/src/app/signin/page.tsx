@@ -18,7 +18,7 @@ export default function SignInPage() {
             <Composer
               draft={SEED_DRAFT}
               setDraft={() => {}}
-              audience="Notion · 200 agents"
+              audience="The public · live"
             />
           </div>
         </Frame>

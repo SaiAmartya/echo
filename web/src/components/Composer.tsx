@@ -1,16 +1,21 @@
 "use client";
+import type { ReactNode } from "react";
 import { Button, Icon } from "./ui/Primitives";
 
 export function Composer({
   draft,
   setDraft,
   audience,
+  audienceSlot,
+  placeholder,
   onRun,
   disabled,
 }: {
   draft: string;
   setDraft: (v: string) => void;
   audience: string;
+  audienceSlot?: ReactNode;
+  placeholder?: string;
   onRun?: () => void;
   disabled?: boolean;
 }) {
@@ -31,7 +36,7 @@ export function Composer({
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        placeholder="Paste a draft here. We'll show you what happens before you publish."
+        placeholder={placeholder ?? "Describe a scenario, post, or what-if. We'll show you what people would think."}
         style={{
           fontFamily: "var(--font-sans)",
           fontSize: 17,
@@ -54,25 +59,27 @@ export function Composer({
           borderTop: "1px solid var(--border)",
         }}
       >
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            whiteSpace: "nowrap",
-            background: "var(--surface-2)",
-            border: "1px solid var(--border)",
-            padding: "6px 10px",
-            borderRadius: 999,
-            fontSize: 12,
-            color: "var(--fg-2)",
-            cursor: "pointer",
-          }}
-        >
-          <Icon name="users" size={13} />
-          {audience}
-          <Icon name="chevronDown" size={12} style={{ opacity: 0.6 }} />
-        </span>
+        {audienceSlot ?? (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
+              background: "var(--surface-2)",
+              border: "1px solid var(--border)",
+              padding: "6px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              color: "var(--fg-2)",
+              cursor: "pointer",
+            }}
+          >
+            <Icon name="users" size={13} />
+            {audience}
+            <Icon name="chevronDown" size={12} style={{ opacity: 0.6 }} />
+          </span>
+        )}
         <span
           style={{
             fontFamily: "var(--font-mono)",
@@ -83,7 +90,6 @@ export function Composer({
         >
           {len} / 3500
         </span>
-        <Button variant="secondary">Save draft</Button>
         <Button
           variant="primary"
           icon={<Icon name="play" size={12} />}
