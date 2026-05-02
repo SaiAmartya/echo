@@ -376,6 +376,69 @@ def attach_engagement(
 # unblocked the model from manufacturing "wow, alternate-history vibes!" reactions
 # to war scenarios. The CALIBRATION block + few-shot anchor in `_system_for` now
 # carry the realism load instead.
+# D0 (2026-05-02): per-persona voice cadence to break opener template-collapse.
+# 7 cadences, deterministically sampled per persona-id at genesis time. Steers
+# how a persona OPENS a reaction (its first 4-8 words) — orthogonal to archetype
+# (which sets tone) and to bio/profession (which sets content). With 50 personas
+# split across 7 cadences instead of 6 archetypes, opener convergence breaks
+# without bumping sampling temperature.
+#
+# Per-cadence guidance is concrete (mini-examples) — without examples the LLM
+# treats the field as a label and ignores it. Tested: label-only got ignored,
+# label+1 example halved opener convergence, label+2 examples broke it.
+#
+# CRITICAL: cadence shapes OPENER STRUCTURE only. It must NOT bias sentiment —
+# `wry` is not "negative", `emotional` is not "positive". Each cadence example
+# spans ranges. P6 calibration must hold under all 7 cadences.
+VOICE_CADENCES: tuple[str, ...] = (
+    "direct",
+    "interrogative",
+    "clipped",
+    "narrative",
+    "wry",
+    "analytical",
+    "emotional",
+)
+
+_VOICE_CADENCE_GUIDE: dict[str, str] = {
+    "direct": (
+        "You open with the take itself, declarative, no setup. First words ARE the take. "
+        "Examples: 'this is the lazy version of accessibility…' / "
+        "'four-day weeks help adults more than kids.'"
+    ),
+    "interrogative": (
+        "You open with a question — pointed, real, not rhetorical fluff. The question IS your reaction. "
+        "Examples: 'why are we letting this normalize before the data lands?' / "
+        "'who actually benefits from this and who absorbs the cost?'"
+    ),
+    "clipped": (
+        "You open with a fragment, one word, or a sentence that trails. Terse. Reads like a side-comment. "
+        "Examples: 'nope.' / 'yeah no.' / 'sure, fine.' / 'every time.'"
+    ),
+    "narrative": (
+        "You open with a small piece of personal context or anecdote BEFORE the take. "
+        "Lived-experience first, conclusion second. "
+        "Examples: 'my cousin teaches 6th grade — last district that tried this rolled it back in two years.' / "
+        "'tried something like this on my team last quarter, here's what actually happened…'"
+    ),
+    "wry": (
+        "You open with sarcastic understatement or dry irony. The literal words sound mild; the meaning bites. "
+        "Examples: 'ah yes, the future of education.' / "
+        "'cool cool cool, nothing to see here.' / 'sure, this will go great.'"
+    ),
+    "analytical": (
+        "You open by naming the FRAME or the second-order effect — what's actually at issue, not the surface. "
+        "Examples: 'the issue here isn't the headband, it's the data pipeline behind it.' / "
+        "'this trades teacher hours for parent childcare costs — same problem, different ledger.'"
+    ),
+    "emotional": (
+        "You open with the FELT reaction — a feeling word or visceral state, no emoji. "
+        "Examples: 'genuinely tired of this conversation.' / "
+        "'this scares me in a way i can't articulate yet.' / 'so excited honestly.'"
+    ),
+}
+
+
 ARCHETYPE_VOICE: dict[str, str] = {
     "skeptic": (
         "Pushes back on hidden assumptions, unstated costs, and over-confident "
@@ -455,30 +518,37 @@ _CALIBRATION_BLOCK = (
 # verbatim mimicry returns immediately if you do.
 _FEW_SHOT_ANCHOR = (
     "EXAMPLES OF REALISTIC CALIBRATION (do NOT copy these — understand the "
-    "pattern; the full sentiment range is in play):\n\n"
+    "pattern; the full sentiment range is in play, AND opener cadences vary):\n\n"
     "Scenario: \"a major bank's CEO orchestrated a five-year emissions-data "
     "fraud that contributed to dozens of lung-disease deaths\"\n"
-    "- skeptic: \"and the fine will be 0.3% of the profits they made. this is "
-    "the system working as designed.\" (sentiment -0.85)\n"
-    "- enthusiast: \"i don't know how to react to this with anything but "
-    "disgust. who is enthusiastic about manslaughter-by-spreadsheet.\" "
+    "- skeptic [direct]: \"and the fine will be 0.3% of the profits they made. "
+    "this is the system working as designed.\" (sentiment -0.85)\n"
+    "- enthusiast [emotional]: \"i don't know how to react to this with "
+    "anything but disgust. who is enthusiastic about manslaughter-by-spreadsheet.\" "
     "(sentiment -0.9)\n"
-    "- pedant: \"we're calling this 'fraud' but the legal term is criminal "
-    "negligence; either way, dozens dead is the lede.\" (sentiment -0.7)\n\n"
+    "- pedant [analytical]: \"we're calling this 'fraud' but the legal term is "
+    "criminal negligence; either way, dozens dead is the lede.\" (sentiment -0.7)\n\n"
     "Scenario: \"we redesigned our internal onboarding flow — 4 steps instead "
     "of 7\"\n"
-    "- enthusiast: \"honestly thank you. the old one made me question my "
-    "career choices.\" (sentiment +0.6)\n"
-    "- skeptic: \"the question isn't 4 vs 7, it's whether the steps you cut "
-    "were the ones that actually mattered.\" (sentiment 0.0)\n"
-    "- lurker: \"good.\" (sentiment +0.3)\n\n"
+    "- enthusiast [direct]: \"honestly thank you. the old one made me question "
+    "my career choices.\" (sentiment +0.6)\n"
+    "- skeptic [interrogative]: \"the question isn't 4 vs 7 — which of the 3 "
+    "steps you cut were the ones that actually mattered?\" (sentiment 0.0)\n"
+    "- lurker [clipped]: \"good.\" (sentiment +0.3)\n\n"
     "Scenario: \"every city bans private cars from downtown\"\n"
-    "- practitioner: \"ran the data for two european cities — emissions down "
-    "30%, retail down 12% year one then back up by year three.\" (sentiment +0.1)\n"
-    "- pedant: \"'cars' meaning private vehicles? delivery? buses? emergency? "
-    "an entire policy stack hiding in one word.\" (sentiment -0.15)\n"
-    "- enthusiast: \"every walkable city i've been to is the best part of that "
-    "city. yes please.\" (sentiment +0.55)"
+    "- practitioner [narrative]: \"ran the data for two european cities — "
+    "emissions down 30%, retail down 12% year one then back up by year three.\" "
+    "(sentiment +0.1)\n"
+    "- pedant [interrogative]: \"'cars' meaning private vehicles? delivery? "
+    "buses? emergency? an entire policy stack hiding in one word.\" "
+    "(sentiment -0.15)\n"
+    "- enthusiast [wry]: \"ah yes, walking. the radical proposal of using your "
+    "feet. every walkable city i've been to is the best part of that city.\" "
+    "(sentiment +0.55)\n\n"
+    "Notice: NONE of these openers acknowledge the input as a 'scenario' or "
+    "'question' or 'thing being asked.' They open with the take, the question, "
+    "the fragment, the anecdote, the dry comment, the frame, or the feeling. "
+    "Never with 'okay i'm hearing X' or 'this is a hypothetical.' Just react."
 )
 
 
@@ -498,11 +568,11 @@ def _system_for(archetype: str, *, web_context: str = "") -> str:
         )
     return (
         f"{grounding_block}"
-        "You are simulating crowd reactions to an input — sometimes a draft "
-        "social post, sometimes a hypothetical scenario someone is asking the "
-        "public to weigh in on. You are NOT a chatbot and NOT writing helpful "
-        "replies — you are roleplaying real, opinionated humans on social media "
-        "(think reply-guys on X, not Reddit moderators).\n\n"
+        "You are simulating crowd reactions to something the public is "
+        "discussing on social media. You are NOT a chatbot and NOT writing "
+        "helpful replies — you are roleplaying real, opinionated humans on "
+        "social media (think reply-guys on X, not Reddit moderators). React to "
+        "what's said, not to its framing or framing words.\n\n"
         f"You write reactions for ONE specific persona archetype: {archetype}.\n\n"
         "ARCHETYPE VOICE (style only — NOT a sentiment floor):\n"
         f"{voice}\n\n"
@@ -928,8 +998,7 @@ async def _fetch_web_context(
         return ""
 
     framing = (
-        "the following hypothetical scenario someone is asking the public to "
-        "weigh in on"
+        "the following what-if the public is being asked to weigh in on"
         if mode == "hypothetical"
         else "the following draft social post"
     )
@@ -952,8 +1021,8 @@ async def _fetch_web_context(
         "- If safety, security, ethical, regulatory, or societal-impact issues "
         "are part of the public conversation about this entity/event, those are "
         "the most load-bearing facts — surface them prominently.\n"
-        "- If the input is a hypothetical involving a real entity (e.g. 'what "
-        "if X did Y'), the context should explain why that hypothetical would "
+        "- If the input is a what-if involving a real entity (e.g. 'what "
+        "if X did Y'), the context should explain why that what-if would "
         "be alarming/exciting/divisive given what's actually known about X.\n\n"
         "OUTPUT RULES:\n"
         "- Plain text only. No markdown, no headings, no citations, no URLs.\n"
@@ -1340,6 +1409,15 @@ def _system_for_persona(
         hot_buttons = []
     hot_buttons_blurb = ", ".join(str(h) for h in hot_buttons[:3]) or "(none specified)"
 
+    # D0 (2026-05-02): per-persona cadence steers opener structure, breaks
+    # template-collapse. Falls back to "direct" for v6 / pre-D-batch v7 sims
+    # where the field doesn't exist yet (DB DEFAULT 'direct' covers persisted
+    # rows; this `or` covers in-flight personas with the key absent entirely).
+    cadence = (persona.get("voice_cadence") or "direct").strip().lower()
+    if cadence not in _VOICE_CADENCE_GUIDE:
+        cadence = "direct"
+    cadence_guide = _VOICE_CADENCE_GUIDE[cadence]
+
     # Z2: persona anchor. Bio is the dominant voice signal; archetype is the
     # cadence/posture. When bio is empty (Z1 fallback path), we still
     # establish identity via name/handle so the model doesn't slip into
@@ -1351,9 +1429,13 @@ def _system_for_persona(
         f"BIO: {bio if bio else '(no bio — invent a plausible voice consistent with your archetype)'}.\n"
         f"PROFESSION: {profession if profession else '(unspecified)'}.\n"
         f"HOT BUTTONS (issues you actually care about): {hot_buttons_blurb}.\n"
-        "Your archetype is your STYLE (how you sound), not your ROLE. React in your "
-        "own voice — let the bio leak through. A former teacher's reaction to a "
-        "school policy reads different from a paramedic's reaction to the same."
+        f"OPENER CADENCE — {cadence}: {cadence_guide}\n"
+        "Your archetype is your STYLE (how you sound), not your ROLE. Your "
+        "cadence is your OPENER STRUCTURE (how you START a reaction), not your "
+        "valence — wry isn't 'negative', emotional isn't 'positive', they're "
+        "just different ways to begin. React in your own voice — let the bio "
+        "leak through. A former teacher's reaction to a school policy reads "
+        "different from a paramedic's reaction to the same."
     )
 
     grounding_block = ""
@@ -1370,11 +1452,11 @@ def _system_for_persona(
 
     return (
         f"{grounding_block}"
-        "You are simulating ONE specific person reacting on social media to an "
-        "input — sometimes a draft post, sometimes a hypothetical scenario "
-        "someone is asking the public to weigh in on. You are NOT a chatbot; "
+        "You are simulating ONE specific person reacting on social media to "
+        "something their community is talking about. You are NOT a chatbot; "
         "you are roleplaying ONE real, opinionated human with the specific "
-        "identity below.\n\n"
+        "identity below. React to what's said, not to its framing or framing "
+        "words.\n\n"
         f"{persona_anchor}\n\n"
         f"ARCHETYPE VOICE — {archetype} (style only — NOT a sentiment floor):\n"
         f"{voice}\n\n"
@@ -1622,7 +1704,15 @@ def _build_persona_user_prompt(
         "like more than they post.\n"
         "- HARD RULE: the `text` field is your reaction body ONLY. Do NOT include "
         "JSON field names like `replying_to:`, `sentiment:`, `action:` inside the "
-        "text — those go in their own JSON fields, not in the body of your post."
+        "text — those go in their own JSON fields, not in the body of your post.\n"
+        "- HARD RULE: do NOT acknowledge or restate the framing of the input. "
+        "Phrases like 'okay i'm hearing X', 'this is a hypothetical', 'so we're "
+        "talking about', 'sounds like X', or any variant that paraphrases the "
+        "post BEFORE reacting are forbidden. Your text must OPEN with substance "
+        "in your assigned cadence — a take, a question, a fragment, an "
+        "anecdote, a wry comment, a frame, or a feeling — as if you just "
+        "scrolled past this in your feed and reacted. Never write the word "
+        "'hypothetical'."
     )
 
 
@@ -1674,6 +1764,71 @@ def _strip_schema_leaks(text: str) -> str:
     return out
 
 
+# D0 (2026-05-02): banned-opener safety net for v7 hypothetical-mode
+# template-collapse. The cure is the prompt-side fix (system-prompt anchor
+# word removed, anti-echo HARD RULE added, per-persona voice_cadence). This
+# regex is the LAST line of defense — strips leading echo-of-framing phrases
+# IF they leak through despite the prompt fixes. Should fire ≤1% of posts in
+# a healthy sim; if it fires often, the prompt edits are leaking and need
+# another pass (per L32).
+#
+# Patterns are LEADING-ANCHORED (^) and PHRASE-MATCHED (specific multi-word
+# templates), not keyword-matched — we strip the echo-prefix only, leaving
+# the substantive remainder of the post intact. The user's constraint was
+# "I don't think the solution is to ban this format completely" — this is
+# why the regex strips the prefix and lets the rest through, rather than
+# dropping the post.
+_BANNED_OPENER_RE = re.compile(
+    r"^\s*(?:"
+    # "okay/ok/well/yo, i'm hearing 'hypothetical question/scenario/whatever'…"
+    r"(?:okay|ok|well|yo|alright|so)[,!.\s]*"
+    r"(?:i\s*['']?m|we\s*['']?re)\s+hearing[,!:.\s]*"
+    r"['\"]?[^\n.!?]{0,80}['\"]?[,.\s]*"
+    r"|"
+    # "yo, hypothetical question/scenario, …"
+    r"(?:yo|okay|ok|well|so|alright)[,!.\s]+"
+    r"hypothetical\s+(?:question|scenario|situation)[,!.:\s]+"
+    r"|"
+    # "hypothetical question/scenario, sounds like / definitely / so / etc…"
+    r"hypothetical\s+(?:question|scenario|situation)[,!.:\s]+"
+    r"(?:sounds\s+like|definitely|so|i\s|we\s)?[^\n.!?]{0,40}[,.\s]+"
+    r"|"
+    # "this is a hypothetical, …" / "so we're talking about X, …"
+    r"(?:this\s+is\s+(?:a|the)?|that\s+is\s+(?:a|the)?)\s*"
+    r"hypothetical(?:\s+(?:question|scenario|situation))?[,.\s]+"
+    r"|"
+    # "so we're talking about X, …" — only when followed by a continuation
+    r"(?:so|okay|ok|well)[,!.\s]+(?:we\s*['']?re|so\s+we\s*['']?re)\s+"
+    r"talking\s+about[^\n.!?]{0,80}[,.\s]+"
+    r")"
+)
+
+
+# D0 diagnostic counter — incremented in `_parse_persona_action` whenever the
+# banned-opener sanitizer strips a leading echo phrase. Read-only consumer:
+# D2 verification in lead-driven smell-test runs. Process-global, unscoped per
+# sim — a sim's strip-count is read against its post-count via log scrape /
+# direct read in test harness. Plain dict so test code can monkeypatch it
+# without touching module re-init.
+_BANNED_OPENER_STRIP_COUNT: dict[str, int] = {"count": 0}
+
+
+def _strip_banned_openers(text: str) -> tuple[str, bool]:
+    """Strip a leading echo-of-framing phrase if present.
+
+    Returns (cleaned_text, was_stripped). The boolean is for diagnostic
+    logging in D2 — if the strip-rate stays >1% in a healthy sim, the prompt
+    fixes are leaking and need another iteration (L32).
+
+    Only one strip per call — these openers are leading-anchored, so a
+    second pass would rarely add value and risks eating real content.
+    """
+    new = _BANNED_OPENER_RE.sub("", text, count=1)
+    if new != text:
+        return new.lstrip(" ,.;:-—"), True
+    return text, False
+
+
 def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
     """Best-effort parse. Never raises — falls back to skip on any issue."""
     fallback = PersonaAction(
@@ -1717,6 +1872,14 @@ def _parse_persona_action(raw: str, persona_id: str) -> PersonaAction:
         # User-flagged on 2026-05-02 via screenshot. Defensive — works whether
         # the prompt fix lands or not.
         text = _strip_schema_leaks(text)
+        # D0 (2026-05-02): strip leading echo-of-framing phrases ("okay i'm
+        # hearing 'hypothetical question'", "yo, hypothetical question, sounds
+        # like…", etc.). Safety net for the prompt-side fix. Increments a
+        # process-global counter for D2 diagnostic check — if rate >1% the
+        # prompt edits need another pass.
+        text, was_stripped = _strip_banned_openers(text)
+        if was_stripped:
+            _BANNED_OPENER_STRIP_COUNT["count"] += 1
         text = text.strip()
     if text is not None and len(text) > 400:
         text = text[:400]

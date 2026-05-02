@@ -663,3 +663,46 @@ Grounding events are NOT persisted in `round_events.payload` (those rows store p
 ---
 
 **v8 LOCKED — 2026-05-02.** Implementation: backend yields the new event from `run_simulation`'s grounding pre-call branch; frontend renders a transient banner in `/simulating`. Lead writes the contract before parallel BE+FE spawn.
+
+---
+
+## v10 (LOCKED — 2026-05-02): per-persona voice cadence (de-template)
+
+User reported template-collapse in v7 hypothetical sims — large fraction of posts opened with "okay i'm hearing 'hypothetical question'…" / "yo, hypothetical question…" variants. Diagnosis: salient anchor word ("hypothetical scenario") in the persona system prompt + no per-persona structural variation in opener style. v10 adds a deterministic per-persona `voice_cadence` enum that steers each persona toward a different opener shape. Pure prompt-side fix; no FE change; sampling unchanged.
+
+### § 37. `RichPersona.voice_cadence: string` (NEW, additive on persona record)
+
+Closed enum, deterministically sampled at persona-genesis time from a stable hash of `persona_id` so replay reads back the same value:
+
+```
+"direct"        — open with the take, declarative
+"interrogative" — open with a question
+"clipped"       — fragment / one-liner / sentence-trail
+"narrative"     — open with personal anecdote or context
+"wry"           — open with sarcastic understatement / dry irony
+"analytical"    — open with the frame / mechanism / second-order effect
+"emotional"     — open with the felt reaction (a feeling word, not an emoji)
+```
+
+- Distribution: deterministic, uniform-ish across the persona pool (`hash(persona_id) % 7`). At 50 personas → ~7 per cadence ± stddev. At dev-mode 17 → ~2-3 per cadence.
+- **Genesis LLM does NOT pick cadence** — it's a post-genesis deterministic assignment so cadence stays uncorrelated with archetype/profession/bio.
+- Persisted in `personas` table (new `voice_cadence TEXT NOT NULL DEFAULT 'direct'` column, idempotent ALTER TABLE — same pattern as the `web_grounding` column).
+- v6 sims have no `voice_cadence` (pre-Z table didn't exist) → graceful default 'direct'.
+
+### § 38. `agent.voice_cadence?: string | null` on Post wire shape (NEW, additive, optional, FE-invisible)
+
+The wire field is plumbed for completeness/debugging only. The FE does NOT render it — cadence is an internal LLM hint, not user-visible metadata. Old FE that ignores the field works unchanged.
+
+### § 39. Replay parity
+
+Cadence is read from the persisted `personas` table, not re-sampled at replay time. Identical sim_id → identical cadence per persona. v6 sims (no row in `personas`) replay unaffected.
+
+### § 40. Backward compat
+
+- Wire shape v1-v9 preserved. New field is strictly additive.
+- v6 / pre-D-batch v7 sims: `voice_cadence` defaults to 'direct' on read, FE doesn't display it, no behavioral regression.
+- New persona system prompt removes the salient anchor word "hypothetical scenario" — describes the input by what the persona does (react to substance) not what the input is. Mode-agnostic.
+
+---
+
+**v10 LOCKED — 2026-05-02.** Implementation: D0 (lead — prompt rewrites + sanitizer + few-shot expansion), D1 (BE — persona_genesis + DB), D2 (lead — verification + P6 regression check), D3 (lead — LEARNINGS).
