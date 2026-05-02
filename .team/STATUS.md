@@ -22,6 +22,9 @@ Updated by each agent after every meaningful task. One line per agent.
 | backend-engineer-4 (opus, general-purpose) | ✅ done | 2026-05-02 05:25 | P2 done (commit 72515ec) — wire contract v4 additive (mode field, optional audience_id, GENERAL_PUBLIC_AUDIENCE, idempotent DB migration). 8/8 wire tests green. Despawned. |
 | frontend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 05:30 | P3 done (commit 3ac1944) — mode plumbed end-to-end, sessionStorage persistence, mode chips on /history+/report, /simulating @notion-attribution dropped for hypothetical. 6/6 browser E2E green. Despawned. |
 | prompt-engineer-1 (opus, general-purpose) | ✅ done | 2026-05-02 05:46 | P6 done (commit b8282d2) — realism overhaul, dropped sentiment floors, calibration block + off-canon few-shot, mode-aware report prompt. 3/3 verification scenarios pass (A: -0.607 mean, B: +0.086 mean with 3/6 archetypes positive, C: -0.186 mean). Caught + fixed verbatim-mimicry between iter-1 and iter-2. Despawned. |
+| backend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 06:08 | Q1-BE done (commit c2d73c2) — rounds [3,6]→[5,15], MAX_LLM_CALLS default 40→100, RULES.md R2 + CONTRACTS v5 §20 LOCKED. Full rounds=15 sim + report verified (340 posts, verdict rethink). api/.env had hardcoded =40 override, bumped locally to 100; flagged in handoff. Despawned. |
+| frontend-engineer-6 (opus, general-purpose) | ✅ done | 2026-05-02 06:18 | Q1-FE+Q2 done (commit 7bacfb0) — rounds dropdown 5-15 next to mode chip, sessionStorage persistence (with hydrate-race bug fix as bonus), Q2 report-ready gate with retry-on-failure. 9/9 Chrome-MCP E2E (skipped destructive test for safety). Despawned. |
+| frontend-engineer-7 (opus, general-purpose) | ✅ done | 2026-05-02 06:30 | Q3 done (commit 4b20857) — X-style tweet cards, word-by-word typing reveal, organic archetype-weighted likes, 1.8s ± jitter pacing, room graph dimmed to 60/40, hydration warning fixed, mulberry32-seeded PRNG for replay parity. 76.8 avg fps at rounds=15 (well above 50 gate). GIF captured to ~/Downloads/q3_thread_reveal.gif. Despawned. |
 
 ## Phase tracker
 
@@ -40,6 +43,10 @@ Updated by each agent after every meaningful task. One line per agent.
   - [x] **P3** — Frontend wires real mode behavior (commit 3ac1944, pushed). 6/6 browser E2E green.
   - [x] **P6** — Realism overhaul (commit b8282d2, pushed). 3/3 verification scenarios pass; user-flagged "US invaded Canada" regression resolved (mean swung from ≈+0.3 to -0.607).
   - [x] **P5** — Demo polish + push (lead). LEARNINGS L16-L18 appended. Pivot complete.
+- [x] **Q (Quality batch)** — Post-pivot quality pass on rounds, redirect gating, and thread visual feel.
+  - [x] **Q1-BE** — rounds [3,6]→[5,15], MAX_LLM_CALLS 40→100, RULES.md R2 + CONTRACTS v5 §20 (commit c2d73c2, pushed)
+  - [x] **Q1-FE+Q2** — rounds dropdown next to mode chip + report-ready redirect gate + hydrate-race bug fix (commit 7bacfb0, pushed)
+  - [x] **Q3** — X-style thread reveal: tweet cards, typing animation, organic likes, paced reveal, hydration warning fix (commit 4b20857, pushed). 76.8 avg fps at rounds=15.
 - [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
