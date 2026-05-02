@@ -18,6 +18,10 @@ Updated by each agent after every meaningful task. One line per agent.
 | security-auditor (opus) | ✅ done | 2026-05-02 02:48 | E3 audit + fix (commits 968c460, 5038d91); despawned. Lead applied semaphore-scope fix (24e62bf) |
 | backend-engineer-3 (opus) | ✅ done | 2026-05-02 03:20 | F1+F2+F3 backend (commit 3ac2824) — gemini-3-flash-preview verified, 3500 char cap, /report endpoint cached + concurrency-guarded |
 | frontend-engineer-3 (opus) | ✅ done | 2026-05-02 03:15 | F1+F3 frontend (commit 3ffdd01) — Composer 3500 cap, See full report button, /report page editorial layout |
+| frontend-engineer-4 (opus, general-purpose) | ✅ done | 2026-05-02 04:00 | P1 done (commit 93710fd) — sidebar trim, mode dropdown, mode-aware hero, /→/compose redirect, auto-seed safety net. Despawned. |
+| backend-engineer-4 (opus, general-purpose) | ✅ done | 2026-05-02 05:25 | P2 done (commit 72515ec) — wire contract v4 additive (mode field, optional audience_id, GENERAL_PUBLIC_AUDIENCE, idempotent DB migration). 8/8 wire tests green. Despawned. |
+| frontend-engineer-5 (opus, general-purpose) | ✅ done | 2026-05-02 05:30 | P3 done (commit 3ac1944) — mode plumbed end-to-end, sessionStorage persistence, mode chips on /history+/report, /simulating @notion-attribution dropped for hypothetical. 6/6 browser E2E green. Despawned. |
+| prompt-engineer-1 (opus, general-purpose) | ✅ done | 2026-05-02 05:46 | P6 done (commit b8282d2) — realism overhaul, dropped sentiment floors, calibration block + off-canon few-shot, mode-aware report prompt. 3/3 verification scenarios pass (A: -0.607 mean, B: +0.086 mean with 3/6 archetypes positive, C: -0.186 mean). Caught + fixed verbatim-mimicry between iter-1 and iter-2. Despawned. |
 
 ## Phase tracker
 
@@ -29,8 +33,14 @@ Updated by each agent after every meaningful task. One line per agent.
 - [x] **F1** — char cap raise 280 → 3500 (bundled into F1+F2+F3 commits)
 - [x] **F2** — analysis call → Gemini 3 Flash Preview (thinking enabled via config; full thread context)
 - [x] **F3** — POST /report endpoint + /report editorial page (commits 3ac2824, 3ffdd01). Awaiting human QA per R9.
-- [ ] **F-fix** — /report 409 race + auto-generate after every sim + italics readability (lead has italics; debugger-2 has backend; QA after both land)
-- [ ] **F4** — Swarm intelligence depth pass (per user direction: "make star feature more smart and comprehensive to truly replicate the public" — awaits proposal after F-fix QA passes)
+- [x] **F-fix** — /report 409 race + auto-generate after every sim + italics readability (commits ef1fb4d, 59aa049, eef2476). Approved.
+- [ ] **P (Pivot)** — Reposition Echo from "social-post pre-flight" to "what will people think if..." — plan approved 2026-05-02, see `~/.claude/plans/melodic-mixing-sunset.md`.
+  - [x] **P1** — UX cleanup + mode dropdown stub (commit 93710fd, pushed). Human-QA'd 2026-05-02.
+  - [x] **P2** — Backend wire contract v4 additive (commit 72515ec, pushed). 8/8 wire tests green.
+  - [x] **P3** — Frontend wires real mode behavior (commit 3ac1944, pushed). 6/6 browser E2E green.
+  - [x] **P6** — Realism overhaul (commit b8282d2, pushed). 3/3 verification scenarios pass; user-flagged "US invaded Canada" regression resolved (mean swung from ≈+0.3 to -0.607).
+  - [x] **P5** — Demo polish + push (lead). LEARNINGS L16-L18 appended. Pivot complete.
+- [ ] **F4 (deferred by pivot)** — Swarm intelligence depth pass — lower priority post-pivot
 - [ ] **G** — Demo polish + GIF + handoff (chrome extension reconnect required)
 
 ## Honest verification gap (per user concern, 2026-05-02)
