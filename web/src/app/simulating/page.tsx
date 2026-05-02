@@ -126,7 +126,7 @@ function SimulatingInner() {
       }
       if (!isReplay) {
         redirectTimerRef.current = setTimeout(() => {
-          router.push(`/results?id=${encodeURIComponent(id)}`);
+          router.push(`/report?id=${encodeURIComponent(id)}`);
         }, DONE_LINGER_MS);
       }
     };
@@ -368,9 +368,9 @@ function SimulatingInner() {
               variant="primary"
               size="sm"
               disabled={!id}
-              onClick={() => id && router.push(`/results?id=${encodeURIComponent(id)}`)}
+              onClick={() => id && router.push(`/report?id=${encodeURIComponent(id)}`)}
             >
-              Back to results
+              Back to report
             </Button>
           ) : running ? (
             <Button
@@ -386,9 +386,9 @@ function SimulatingInner() {
               variant="primary"
               size="sm"
               disabled={!done || !id}
-              onClick={() => id && router.push(`/results?id=${encodeURIComponent(id)}`)}
+              onClick={() => id && router.push(`/report?id=${encodeURIComponent(id)}`)}
             >
-              See analysis
+              See report
             </Button>
           )}
         </div>

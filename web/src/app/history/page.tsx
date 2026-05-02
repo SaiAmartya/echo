@@ -162,11 +162,11 @@ export default function HistoryPage() {
                   key={h.simulation_id}
                   role="link"
                   tabIndex={0}
-                  onClick={() => router.push(`/results?id=${encodeURIComponent(h.simulation_id)}`)}
+                  onClick={() => router.push(`/report?id=${encodeURIComponent(h.simulation_id)}`)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      router.push(`/results?id=${encodeURIComponent(h.simulation_id)}`);
+                      router.push(`/report?id=${encodeURIComponent(h.simulation_id)}`);
                     }
                   }}
                   style={{

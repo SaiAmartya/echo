@@ -201,11 +201,19 @@ function ReportInner() {
         )}
 
         {report && !loading && (
-          <ReportBody report={report.report} />
+          <ReportBody
+            report={report.report}
+            onUseRewrite={(text) => {
+              if (typeof window !== "undefined") {
+                window.sessionStorage.setItem("echo:draft", text);
+              }
+              router.push("/compose");
+            }}
+          />
         )}
 
         {/* Footer actions */}
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
           <Button
             variant="ghost"
             icon={<Icon name="refresh" size={13} />}
@@ -214,15 +222,27 @@ function ReportInner() {
           >
             Regenerate
           </Button>
-          <div style={{ flex: 1 }} />
           <Button
-            variant="secondary"
+            variant="ghost"
+            icon={<Icon name="replies" size={13} />}
             onClick={() =>
-              id && router.push(`/results?id=${encodeURIComponent(id)}`)
+              id &&
+              router.push(`/simulating?id=${encodeURIComponent(id)}&replay=1`)
             }
             disabled={!id}
           >
-            Back to results
+            View thread
+          </Button>
+          <Button
+            variant="ghost"
+            icon={<Icon name="refresh" size={13} />}
+            onClick={() => router.push("/compose")}
+          >
+            Re-run
+          </Button>
+          <div style={{ flex: 1 }} />
+          <Button variant="secondary" onClick={() => router.push("/compose")}>
+            Edit draft
           </Button>
         </div>
       </div>
@@ -230,7 +250,13 @@ function ReportInner() {
   );
 }
 
-function ReportBody({ report }: { report: Report }) {
+function ReportBody({
+  report,
+  onUseRewrite,
+}: {
+  report: Report;
+  onUseRewrite: (text: string) => void;
+}) {
   return (
     <>
       {/* 1. Executive summary */}
@@ -493,6 +519,15 @@ function ReportBody({ report }: { report: Report }) {
               >
                 {opt.rationale}
               </p>
+              <div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => onUseRewrite(opt.text)}
+                >
+                  Use this rewrite
+                </Button>
+              </div>
             </div>
           ))}
         </div>
