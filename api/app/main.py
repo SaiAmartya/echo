@@ -415,6 +415,14 @@ async def simulate_stream(
                     upsert_analysis(simulation_id, payload)
                     # Don't emit to client — sentinel for persistence only.
                     continue  # skip the sleep — nothing to flush
+                elif event_name == "grounding":
+                    # CONTRACTS v8 §31: pass through the loading-state event
+                    # so FE can show a "searching the web…" banner during the
+                    # ~22s pre-call window. NOT persisted to round_events —
+                    # per §33, replay payloads intentionally exclude pre-round
+                    # events (the round_events table stores per-round
+                    # cumulative posts, not pre-round metadata).
+                    yield {"event": "grounding", "data": json.dumps(data)}
                 elif event_name == "done":
                     yield {"event": "done", "data": json.dumps(data)}
                 elif event_name == "error":

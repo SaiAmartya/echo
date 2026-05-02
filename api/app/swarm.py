@@ -976,12 +976,13 @@ async def _fetch_web_context(
                     config=config,
                 ),
                 # Search adds latency — Google fetches results then the model
-                # synthesizes. Empirical p95 ≈ 8s; cap at 15s before falling
-                # back to ungrounded.
-                timeout=15.0,
+                # synthesizes. Empirical p95 ≈ 8s; lead's repro showed
+                # Google-Search-grounded calls complete in 17-22s, so 15s was
+                # too tight; bumped to 25s before falling back to ungrounded.
+                timeout=25.0,
             )
         except asyncio.TimeoutError:
-            log.warning("web_grounding: timeout after 15s — proceeding ungrounded")
+            log.warning("web_grounding: timeout after 25s — proceeding ungrounded")
             return ""
         except Exception as exc:  # noqa: BLE001
             log.warning("web_grounding: call failed: %r", exc)
@@ -1958,17 +1959,30 @@ async def run_simulation(
     # web_context too if Z2 wants it (Z1 doesn't yet).
     web_context = ""
     if web_grounding:
+        # CONTRACTS v8 §31: emit `event: grounding` so FE can show a
+        # "searching the web…" banner during the silent ~22s pre-call window.
+        # Sequence guarantee (§32): exactly ONE `searching` followed by
+        # exactly ONE of `{done, skipped, failed}`. Replay parity (§33): NOT
+        # persisted to round_events — pre-round events are intentionally
+        # absent from replay payloads.
+        yield {"event": "grounding", "data": {"status": "searching"}}
         try:
             web_context = await _fetch_web_context(
                 draft=draft, mode=mode, budget=budget, client=client
             )
             if web_context:
                 log.info("sim %s: web_grounding produced %d chars of context", sim_id, len(web_context))
+                yield {"event": "grounding", "data": {"status": "done", "chars_added": len(web_context)}}
+            else:
+                yield {"event": "grounding", "data": {"status": "skipped", "reason": "no_relevant_context"}}
         except BudgetExceededError:
+            # Re-raise — outer handler maps to event: error code budget_exceeded.
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("sim %s: web_grounding pre-call crashed — proceeding ungrounded", sim_id)
             web_context = ""
+            # Truncate the reason so we don't bloat the wire frame.
+            yield {"event": "grounding", "data": {"status": "failed", "reason": str(e)[:120]}}
 
     # v7 persona pool — populated by genesis below. Empty for v6 sims (and
     # v7 sims that crashed all the way through to no pool, which then fall
